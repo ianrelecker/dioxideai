@@ -7,6 +7,22 @@ const chatArea = document.getElementById('chatArea');
 const promptInput = document.getElementById('promptInput');
 const inputForm = document.getElementById('inputForm');
 const sendButton = document.getElementById('sendBtn');
+const webSearchToggleBtn = document.getElementById('webSearchToggleBtn');
+const settingsButton = document.getElementById('settingsBtn');
+const settingsOverlay = document.getElementById('settingsOverlay');
+const settingsPanel = document.getElementById('settingsPanel');
+const settingsCloseButton = document.getElementById('settingsCloseBtn');
+const settingsForm = document.getElementById('settingsForm');
+const autoWebSearchToggle = document.getElementById('autoWebSearchToggle');
+const openThoughtsToggle = document.getElementById('openThoughtsToggle');
+const searchResultLimitInput = document.getElementById('searchResultLimit');
+const searchResultValue = document.getElementById('searchResultValue');
+
+const DEFAULT_SETTINGS = {
+  autoWebSearch: true,
+  openThoughtsByDefault: false,
+  searchResultLimit: 6,
+};
 
 const state = {
   chats: [],
@@ -14,12 +30,15 @@ const state = {
   currentChat: null,
   pendingAssistantByChat: new Map(),
   isStreaming: false,
+  settings: { ...DEFAULT_SETTINGS },
+  settingsPanelOpen: false,
 };
 
 window.addEventListener('DOMContentLoaded', async () => {
   registerStreamHandlers();
   registerUIListeners();
   updateInteractivity();
+  await loadSettings();
   await populateModels();
   await initializeChats();
   promptInput.focus();
@@ -49,6 +68,143 @@ function registerUIListeners() {
     event.preventDefault();
     await handlePromptSubmit();
   });
+
+  promptInput.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    if (!state.isStreaming) {
+      await handlePromptSubmit();
+    }
+  });
+
+  settingsButton?.addEventListener('click', openSettingsPanel);
+  settingsCloseButton?.addEventListener('click', closeSettingsPanel);
+  settingsOverlay?.addEventListener('click', (event) => {
+    if (
+      event.target === settingsOverlay ||
+      (event.target.classList && event.target.classList.contains('settings-backdrop'))
+    ) {
+      closeSettingsPanel();
+    }
+  });
+  settingsPanel?.addEventListener('click', (event) => {
+    event.stopPropagation();
+  });
+
+  settingsForm?.addEventListener('submit', (event) => event.preventDefault());
+  autoWebSearchToggle?.addEventListener('change', () =>
+    applySettingsUpdate({ autoWebSearch: autoWebSearchToggle.checked })
+  );
+  webSearchToggleBtn?.addEventListener('click', handleQuickWebSearchToggle);
+  openThoughtsToggle?.addEventListener('change', () =>
+    applySettingsUpdate({ openThoughtsByDefault: openThoughtsToggle.checked })
+  );
+  searchResultLimitInput?.addEventListener('input', () =>
+    updateSearchResultLabel(Number(searchResultLimitInput.value))
+  );
+  searchResultLimitInput?.addEventListener('change', () =>
+    applySettingsUpdate({ searchResultLimit: Number(searchResultLimitInput.value) })
+  );
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && state.settingsPanelOpen) {
+      closeSettingsPanel();
+    }
+  });
+}
+
+async function loadSettings() {
+  try {
+    const prefs = await window.api.getSettings();
+    state.settings = { ...DEFAULT_SETTINGS, ...prefs };
+  } catch (err) {
+    console.error('Failed to load settings:', err);
+    state.settings = state.settings || { ...DEFAULT_SETTINGS };
+  }
+
+  applySettingsToUI();
+}
+
+function applySettingsToUI() {
+  const prefs = state.settings || DEFAULT_SETTINGS;
+
+  if (autoWebSearchToggle) {
+    autoWebSearchToggle.checked = Boolean(prefs.autoWebSearch);
+  }
+  updateWebSearchButton(Boolean(prefs.autoWebSearch));
+
+  if (openThoughtsToggle) {
+    openThoughtsToggle.checked = Boolean(prefs.openThoughtsByDefault);
+  }
+
+  const limit = clampSearchLimitForUI(prefs.searchResultLimit);
+  if (searchResultLimitInput) {
+    searchResultLimitInput.value = String(limit);
+  }
+  updateSearchResultLabel(limit);
+}
+
+function openSettingsPanel() {
+  applySettingsToUI();
+  settingsOverlay.classList.remove('hidden');
+  settingsOverlay.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('settings-open');
+  state.settingsPanelOpen = true;
+  settingsButton.setAttribute('aria-expanded', 'true');
+  if (settingsPanel) {
+    settingsPanel.setAttribute('tabindex', '-1');
+    settingsPanel.focus();
+  }
+}
+
+function closeSettingsPanel() {
+  settingsOverlay.classList.add('hidden');
+  settingsOverlay.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('settings-open');
+  state.settingsPanelOpen = false;
+  settingsButton.setAttribute('aria-expanded', 'false');
+  if (typeof settingsButton.focus === 'function') {
+    settingsButton.focus();
+  }
+  updateInteractivity();
+}
+
+async function applySettingsUpdate(partial) {
+  try {
+    const updated = await window.api.updateSettings(partial);
+    state.settings = { ...DEFAULT_SETTINGS, ...updated };
+    applySettingsToUI();
+  } catch (err) {
+    console.error('Failed to update settings:', err);
+  }
+}
+
+function handleQuickWebSearchToggle() {
+  const nextValue = !(state.settings?.autoWebSearch ?? true);
+  applySettingsUpdate({ autoWebSearch: nextValue });
+}
+
+function updateWebSearchButton(enabled) {
+  if (!webSearchToggleBtn) {
+    return;
+  }
+  webSearchToggleBtn.setAttribute('aria-pressed', String(Boolean(enabled)));
+  webSearchToggleBtn.textContent = enabled ? 'Web Search: On' : 'Web Search: Off';
+  webSearchToggleBtn.classList.toggle('off', !enabled);
+}
+
+function updateSearchResultLabel(value) {
+  if (!searchResultValue) {
+    return;
+  }
+  searchResultValue.textContent = String(clampSearchLimitForUI(value));
+}
+
+function clampSearchLimitForUI(value) {
+  const numeric = Number.isFinite(Number(value)) ? Number(value) : DEFAULT_SETTINGS.searchResultLimit;
+  return Math.max(1, Math.min(12, Math.round(numeric)));
 }
 
 function registerStreamHandlers() {
@@ -86,18 +242,28 @@ function registerStreamHandlers() {
       return;
     }
 
-    if (data.stage === 'search-started') {
-      entry.setSummary('Thoughts · Searching');
+    if (data.stage === 'search-plan' || data.stage === 'search-started') {
+      entry.setSummary('Thoughts · Planning search');
       entry.openThoughts();
-      entry.setThought(data.message || 'Searching the web for context…');
+      entry.setThought(
+        formatSearchPlanThought({
+          message: data.message || 'Preparing web search queries.',
+          queries: data.queries,
+        })
+      );
     } else if (data.stage === 'context') {
       const summary = data.context ? 'Thoughts · Web context' : 'Thoughts · Model memory';
       entry.setSummary(summary);
       entry.openThoughts();
       entry.setThought(
-        data.context?.trim()
-          ? data.context.trim()
-          : data.message || 'No additional context used.'
+        formatContextThought({
+          message: data.context?.trim()
+            ? data.message || 'Context gathered from the web.'
+            : data.message || 'No additional context used.',
+          context: data.context,
+          queries: data.queries,
+          retrievedAt: data.retrievedAt,
+        })
       );
     }
   });
@@ -199,13 +365,29 @@ async function handlePromptSubmit() {
       return;
     }
 
-    assistantEntry.setSummary(result.context ? 'Thoughts · Web context' : 'Thoughts');
+    const contextSummary = result.context ? 'Thoughts · Web context' : 'Thoughts';
+    assistantEntry.setSummary(contextSummary);
     assistantEntry.openThoughts();
     assistantEntry.setThought(
-      result.context?.trim() ? result.context.trim() : 'No additional context used.'
+      formatContextThought({
+        message: result.context
+          ? 'Context applied to compose the answer.'
+          : 'No additional context used.',
+        context: result.context,
+        queries: result.contextQueries,
+        retrievedAt: result.contextRetrievedAt,
+      })
     );
 
-    recordAssistantMessage(result.answer, result.context, model);
+    recordAssistantMessage(
+      result.answer,
+      {
+        context: result.context,
+        queries: result.contextQueries,
+        retrievedAt: result.contextRetrievedAt,
+      },
+      model
+    );
     state.pendingAssistantByChat.delete(chatId);
     state.isStreaming = false;
     updateInteractivity();
@@ -284,12 +466,11 @@ function renderChat(chat) {
     if (message.role === 'user') {
       appendUserMessage(message.content);
     } else {
+      const usedWeb = Boolean(message.meta?.usedWebSearch);
       appendAssistantMessage(message.content, {
         open: false,
-        thoughts: message.meta?.context
-          ? message.meta.context
-          : 'No additional context used.',
-        summary: message.meta?.usedWebSearch ? 'Thoughts · Web context' : 'Thoughts',
+        thoughts: formatStoredContext(message.meta),
+        summary: usedWeb ? 'Thoughts · Web context' : 'Thoughts',
       });
     }
   });
@@ -345,7 +526,12 @@ function appendUserMessage(content) {
 }
 
 function appendAssistantMessage(content, options = {}) {
-  const { open = false, thoughts = '', summary = 'Thoughts' } = options;
+  const openDefault = state.settings?.openThoughtsByDefault ?? false;
+  const {
+    open = openDefault,
+    thoughts = '',
+    summary = 'Thoughts',
+  } = options;
 
   const container = document.createElement('div');
   container.classList.add('message', 'bot');
@@ -415,20 +601,25 @@ function recordUserMessage(content) {
   }
 }
 
-function recordAssistantMessage(content, context, model) {
+function recordAssistantMessage(content, contextData, model) {
   if (!state.currentChat) {
     return;
   }
   state.currentChat.messages = state.currentChat.messages || [];
   const timestamp = new Date().toISOString();
+  const contextText = contextData?.context || '';
+  const contextQueries = contextData?.queries || [];
+  const contextRetrievedAt = contextData?.retrievedAt || null;
 
   state.currentChat.messages.push({
     role: 'assistant',
     content,
     createdAt: timestamp,
     meta: {
-      context,
-      usedWebSearch: Boolean(context),
+      context: contextText,
+      contextQueries,
+      contextRetrievedAt,
+      usedWebSearch: Boolean(contextText),
     },
   });
   state.currentChat.model = model;
@@ -461,10 +652,88 @@ function updateInteractivity() {
   promptInput.disabled = state.isStreaming;
   sendButton.disabled = state.isStreaming;
   newChatButton.disabled = state.isStreaming;
+  if (webSearchToggleBtn) {
+    webSearchToggleBtn.disabled = state.isStreaming;
+  }
+  if (!state.settingsPanelOpen) {
+    settingsButton.disabled = state.isStreaming;
+  }
   if (state.isStreaming) {
     chatListNav.classList.add('disabled');
   } else {
     chatListNav.classList.remove('disabled');
+    if (!state.settingsPanelOpen) {
+      settingsButton.disabled = false;
+    }
+  }
+}
+
+function formatSearchPlanThought({ message, queries }) {
+  const lines = [];
+  if (message) {
+    lines.push(message);
+  }
+  if (queries?.length) {
+    lines.push('', 'Queries:');
+    queries.forEach((query) => {
+      lines.push(`• ${query}`);
+    });
+  }
+  return lines.join('\n').trim() || 'Preparing web search queries.';
+}
+
+function formatContextThought({ message, context, queries, retrievedAt }) {
+  const lines = [];
+  const hasEmbeddedQueries =
+    typeof context === 'string' && context.toLowerCase().includes('queries used:');
+  const hasEmbeddedTimestamp =
+    typeof context === 'string' && context.toLowerCase().includes('fresh context collected');
+  if (message) {
+    lines.push(message);
+  }
+  if (retrievedAt && !hasEmbeddedTimestamp) {
+    lines.push(`Retrieved: ${formatTimestamp(retrievedAt)}`);
+  }
+  if (context?.trim()) {
+    lines.push('', context.trim());
+  }
+  if (queries?.length && !hasEmbeddedQueries) {
+    lines.push('', 'Queries:');
+    queries.forEach((query) => {
+      lines.push(`• ${query}`);
+    });
+  }
+  return lines.join('\n').trim() || 'No additional context used.';
+}
+
+function formatStoredContext(meta = {}) {
+  const hasQueries = Array.isArray(meta.contextQueries) && meta.contextQueries.length > 0;
+  return formatContextThought({
+    message: meta.usedWebSearch
+      ? 'Context used when drafting this reply.'
+      : hasQueries
+        ? 'Web search disabled (saved candidate queries).'
+        : 'No additional context used.',
+    context: meta.context,
+    queries: meta.contextQueries,
+    retrievedAt: meta.contextRetrievedAt,
+  });
+}
+
+function formatTimestamp(isoString) {
+  if (!isoString) {
+    return '';
+  }
+  try {
+    const date = new Date(isoString);
+    return new Intl.DateTimeFormat(undefined, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(date);
+  } catch (err) {
+    return isoString;
   }
 }
 

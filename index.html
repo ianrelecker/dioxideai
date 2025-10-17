@@ -23,6 +23,26 @@
           <button id="refreshModels" type="button" aria-label="Refresh models list">↻</button>
         </div>
         <div id="chatTitle" aria-live="polite"></div>
+        <div class="header-actions">
+          <button
+            id="webSearchToggleBtn"
+            type="button"
+            aria-pressed="true"
+            aria-label="Toggle automatic web search"
+          >
+            Web Search: On
+          </button>
+          <button
+            id="settingsBtn"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            aria-controls="settingsPanel"
+            aria-label="Open settings"
+          >
+            ⚙︎
+          </button>
+        </div>
       </header>
 
       <main id="chatArea" role="log" aria-live="polite" aria-label="Chat conversation"></main>
@@ -35,6 +55,62 @@
           rows="2"
         ></textarea>
         <button type="submit" id="sendBtn">Send</button>
+      </form>
+    </section>
+  </div>
+
+  <div id="settingsOverlay" class="settings-overlay hidden" aria-hidden="true">
+    <div class="settings-backdrop"></div>
+    <section
+      id="settingsPanel"
+      class="settings-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="settingsTitle"
+      tabindex="-1"
+    >
+      <header class="settings-header">
+        <h2 id="settingsTitle">Settings</h2>
+        <button id="settingsCloseBtn" type="button" aria-label="Close settings">✕</button>
+      </header>
+
+      <form id="settingsForm">
+        <fieldset>
+          <legend>Context Retrieval</legend>
+          <label class="setting-toggle">
+            <input type="checkbox" id="autoWebSearchToggle" />
+            <span>
+              <strong>Automatic web search</strong>
+              <small>Enrich prompts with fresh snippets from DuckDuckGo.</small>
+            </span>
+          </label>
+
+          <label class="setting-toggle">
+            <input type="checkbox" id="openThoughtsToggle" />
+            <span>
+              <strong>Open thoughts drawer by default</strong>
+              <small>Keep the reasoning/context panel expanded for each reply.</small>
+            </span>
+          </label>
+
+          <label class="setting-range">
+            <div>
+              <strong>Max search results per prompt</strong>
+              <small>Number of snippets to collect (1-12): <span id="searchResultValue">6</span></small>
+            </div>
+            <input type="range" id="searchResultLimit" min="1" max="12" step="1" value="6" />
+          </label>
+        </fieldset>
+
+        <section class="settings-note">
+          <h3>Ideas for what’s next</h3>
+          <ul>
+            <li>Conversation export (Markdown/PDF)</li>
+            <li>Local vector store for personal notes</li>
+            <li>Theme picker with light/dark/system modes</li>
+            <li>Per-model defaults and temperature controls</li>
+          </ul>
+        </section>
       </form>
     </section>
   </div>

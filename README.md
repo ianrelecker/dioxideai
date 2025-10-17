@@ -8,6 +8,8 @@ Desktop chat interface for running local large language models through [Ollama](
 - Streaming responses from the Ollama `/api/chat` endpoint, rendered token-by-token.
 - “Thoughts” panel that exposes the assistant’s current step (searching, context retrieved, etc.).
 - Real web search integration powered by DuckDuckGo HTML scraping (no API key required).
+- Smart search planning that expands broad prompts (e.g., “latest news”) into focused queries for richer context.
+- Configurable settings (gear menu) for auto web search, thoughts drawer behaviour, and snippet limits.
 - Local-first storage of every conversation in `app.getPath('userData')`.
 
 ## Requirements
@@ -40,11 +42,22 @@ This launches the Electron app with auto-reload enabled. Edit the files under `o
 1. Open the app (`npm run dev` or the packaged build).
 2. Click **+ New Chat** or pick an existing conversation from the sidebar.
 3. Select one of the locally installed Ollama models (models are discovered via `GET /api/tags`).
-4. Type a prompt and press **Send** or hit **Enter**.
-5. The main process decides whether to augment the prompt with live context. If it does, it scrapes DuckDuckGo snippets with `cheerio`, injects them as context, and streams a reply from Ollama’s `/api/chat`.
+4. Type a prompt and press **Send** or hit **Enter** (use **Shift+Enter** for a newline).
+5. The main process decides whether to augment the prompt with live context. If it does, it plans a set of DuckDuckGo queries (broad requests like “latest news” are expanded automatically), scrapes the top snippets with `cheerio`, and streams a reply from Ollama’s `/api/chat`.
 6. Responses arrive in real time; open the “Thoughts” disclosure under each assistant reply to inspect the retrieved context.
+7. Use the **Web Search** pill in the header for a quick on/off toggle (defaults to on). Open the gear icon to adjust additional preferences.
 
 Chats are saved automatically and reloaded when you reopen the application.
+
+## Settings Panel
+
+Click the gear icon in the chat header to open the modal preferences panel:
+
+- **Automatic web search** – disable to keep the assistant strictly offline.
+- **Open thoughts by default** – auto-expand the reasoning/context drawer for each reply.
+- **Max search results** – slider (1–12) controlling how many snippets are collected from DuckDuckGo per prompt.
+
+Preferences persist in `~/Library/Application Support/ollama-electron-gui/ollama-electron-settings.json`.
 
 ## Packaging (macOS)
 
@@ -60,8 +73,8 @@ Forge outputs a signed (development) `.app` under `out/`. For production distrib
 
 ## Configuration
 
-- **Web search toggle**: `main.js` uses a heuristic (`shouldUseWebSearch`) to decide when to fetch context. Adjust or expose a UI toggle if desired.
-- **Context window**: The scraped snippets are limited to the top three results to avoid exceeding model context limits. Tweak in `performWebSearch`.
+- **Web search toggle**: Controlled from the UI or programmatically via `createSearchPlan` helpers in `main.js`.
+- **Context window**: The scraper keeps up to `searchResultLimit` snippets per query (UI slider). Tune logic in `performWebSearch`.
 - **Streaming**: Responses already stream token-by-token. If you prefer batched replies, set `stream: false` in `ask-ollama` and remove the renderer’s stream listeners.
 
 ## Data Storage
@@ -70,7 +83,9 @@ Chat logs are serialized to JSON at:
 
 - **macOS**: `~/Library/Application Support/ollama-electron-gui/ollama-electron-chats.json`
 
-Delete that file to clear the history.
+Preferences live alongside chats in `~/Library/Application Support/ollama-electron-gui/ollama-electron-settings.json`.
+
+Delete those files to clear the history and reset settings.
 
 ## Troubleshooting
 
@@ -78,6 +93,13 @@ Delete that file to clear the history.
 - **Slow responses**: Larger models take longer to load; the first query may be slow while the model warms up.
 - **Blocked network**: DuckDuckGo HTML endpoint must be reachable; firewalls or VPNs can interfere with scraping.
 - **Packaging issues**: When packaging with Forge/Builder, ensure native modules (`cheerio`) are handled automatically; rebuilding is not required because dependencies are pure JS.
+
+## Future Enhancements
+
+- Conversation export (Markdown/PDF) for sharing transcripts.
+- Local vector store to ground models on personal notes or documents.
+- Theme picker (light/dark/system) and compact density modes.
+- Per-model defaults, temperature controls, and advanced Ollama parameters.
 
 ## Project Structure
 
