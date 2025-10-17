@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ollama Chat GUI</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside id="sidebar" aria-label="Saved chats">
+      <div class="sidebar-header">
+        <button id="newChatBtn" type="button">+ New Chat</button>
+      </div>
+      <nav id="chatList" aria-label="Chat history"></nav>
+    </aside>
+
+    <section id="chatPane">
+      <header>
+        <div class="model-controls">
+          <label for="modelSelect">Model:</label>
+          <select id="modelSelect" aria-label="Ollama model selector"></select>
+          <button id="refreshModels" type="button" aria-label="Refresh models list">↻</button>
+        </div>
+        <div id="chatTitle" aria-live="polite"></div>
+      </header>
+
+      <main id="chatArea" role="log" aria-live="polite" aria-label="Chat conversation"></main>
+
+      <form id="inputForm">
+        <textarea
+          id="promptInput"
+          placeholder="Type your question..."
+          aria-label="Your prompt"
+          rows="2"
+        ></textarea>
+        <button type="submit" id="sendBtn">Send</button>
+      </form>
+    </section>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
