@@ -20,9 +20,6 @@ let searchResultLimitInput;
 let searchResultValue;
 let themeSelect;
 let sidebarCollapseToggle;
-let exportMarkdownBtn;
-let exportPdfBtn;
-let exportStatus;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
@@ -40,13 +37,23 @@ const state = {
   isStreaming: false,
   settings: { ...DEFAULT_SETTINGS },
   settingsPanelOpen: false,
+  activeRequestId: null,
+  activeAssistantEntry: null,
 };
 
 const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
+const createRequestId = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+function stopGeneration(requestId) {
+  if (!requestId) {
+    return Promise.resolve();
+  }
+
+  return window.api.cancelOllama({ requestId });
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
-  console.log('DOMContentLoaded fired');
-  console.log('window.api:', window.api);
 
   modelSelect = document.getElementById('modelSelect');
   refreshModelsButton = document.getElementById('refreshModels');
@@ -70,11 +77,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   searchResultValue = document.getElementById('searchResultValue');
   themeSelect = document.getElementById('themeSelect');
   sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
-  exportMarkdownBtn = document.getElementById('exportMarkdownBtn');
-  exportPdfBtn = document.getElementById('exportPdfBtn');
-  exportStatus = document.getElementById('exportStatus');
 
-  console.log('DOM elements loaded, starting initialization');
 
   try {
     registerStreamHandlers();
@@ -84,7 +87,6 @@ window.addEventListener('DOMContentLoaded', async () => {
     await populateModels();
     await initializeChats();
     promptInput.focus();
-    console.log('Initialization complete');
   } catch (error) {
     console.error('Initialization failed:', error);
   }
@@ -292,12 +294,28 @@ function registerStreamHandlers() {
     }
 
     if (data.error) {
+      entry.clearActions();
       entry.setContent(data.error);
       entry.setSummary('Error');
       entry.openThoughts();
       entry.setThought(data.error);
       state.pendingAssistantByChat.delete(data.chatId);
       state.isStreaming = false;
+      state.activeRequestId = null;
+      state.activeAssistantEntry = null;
+      updateInteractivity();
+      return;
+    }
+
+    if (data.aborted) {
+      entry.clearActions();
+      entry.setContent('Generation stopped.');
+      entry.setSummary('Notes');
+      entry.setThought('Generation canceled by user.');
+      state.pendingAssistantByChat.delete(data.chatId);
+      state.isStreaming = false;
+      state.activeRequestId = null;
+      state.activeAssistantEntry = null;
       updateInteractivity();
       return;
     }
@@ -307,8 +325,11 @@ function registerStreamHandlers() {
     }
 
     if (data.done) {
+      entry.clearActions();
       state.pendingAssistantByChat.delete(data.chatId);
       state.isStreaming = false;
+      state.activeRequestId = null;
+      state.activeAssistantEntry = null;
       updateInteractivity();
     }
   });
@@ -416,20 +437,58 @@ async function handlePromptSubmit() {
   state.isStreaming = true;
   updateInteractivity();
 
+  const requestId = createRequestId();
+
   const assistantEntry = appendAssistantMessage('Thinking…', {
     open: true,
     thoughts: 'Preparing response…',
     summary: 'Notes',
   });
 
+  const stopButton = document.createElement('button');
+  stopButton.type = 'button';
+  stopButton.classList.add('stop-generation-btn');
+  stopButton.textContent = 'Stop';
+  stopButton.setAttribute('aria-label', 'Stop generating response');
+  stopButton.addEventListener('click', () => {
+    if (stopButton.disabled) {
+      return;
+    }
+    stopButton.disabled = true;
+    stopButton.textContent = 'Stopping…';
+    stopGeneration(requestId).catch((err) => {
+      console.error('Failed to cancel generation:', err);
+      stopButton.disabled = false;
+      stopButton.textContent = 'Stop';
+    });
+  });
+  assistantEntry.addActionButton(stopButton);
+
   state.pendingAssistantByChat.set(chatId, assistantEntry);
+  state.activeRequestId = requestId;
+  state.activeAssistantEntry = assistantEntry;
 
   try {
     const result = await window.api.askOllama({
       chatId,
       model,
       prompt,
+      requestId,
     });
+
+    assistantEntry.clearActions();
+    state.activeRequestId = null;
+    state.activeAssistantEntry = null;
+
+    if (result?.aborted) {
+      assistantEntry.setContent('Generation stopped.');
+      assistantEntry.setSummary('Notes');
+      assistantEntry.setThought('Generation canceled by user.');
+      state.pendingAssistantByChat.delete(chatId);
+      state.isStreaming = false;
+      updateInteractivity();
+      return;
+    }
 
     if (result?.error) {
       assistantEntry.setContent(result.error);
@@ -475,12 +534,15 @@ async function handlePromptSubmit() {
     updateChatTitle();
   } catch (err) {
     console.error(err);
+    assistantEntry.clearActions();
     assistantEntry.setContent('Error: Unable to get response');
     assistantEntry.setSummary('Error');
     assistantEntry.openThoughts();
     assistantEntry.setThought(err.message || 'Unknown error');
     state.pendingAssistantByChat.delete(chatId);
     state.isStreaming = false;
+    state.activeRequestId = null;
+    state.activeAssistantEntry = null;
     updateInteractivity();
   }
 }
@@ -621,6 +683,11 @@ function appendAssistantMessage(content, options = {}) {
   setMessageContent(text, content);
   container.appendChild(text);
 
+  const actions = document.createElement('div');
+  actions.classList.add('message-actions');
+  actions.style.display = 'none';
+  container.appendChild(actions);
+
   const details = document.createElement('details');
   details.classList.add('thoughts');
   details.open = open;
@@ -635,6 +702,7 @@ function appendAssistantMessage(content, options = {}) {
   details.appendChild(thoughtsText);
 
   container.appendChild(details);
+
   chatArea.appendChild(container);
   chatArea.scrollTop = chatArea.scrollHeight;
 
@@ -656,6 +724,14 @@ function appendAssistantMessage(content, options = {}) {
     },
     closeThoughts: () => {
       details.open = false;
+    },
+    addActionButton: (button) => {
+      actions.style.display = 'flex';
+      actions.appendChild(button);
+    },
+    clearActions: () => {
+      actions.innerHTML = '';
+      actions.style.display = 'none';
     },
   };
 }
@@ -843,17 +919,35 @@ function formatChatMeta(chat) {
   return `${model} • ${when}`;
 }
 
-async function setMessageContent(element, value) {
+function setMessageContent(element, value) {
   const content = value ?? '';
   try {
-    const rendered = window.api.renderMarkdown
-      ? await window.api.renderMarkdown(content)
+    const maybeRendered = window.api.renderMarkdown
+      ? window.api.renderMarkdown(content)
       : content;
-    element.innerHTML = rendered;
+
+    if (maybeRendered && typeof maybeRendered.then === 'function') {
+      maybeRendered
+        .then((rendered) => applyRenderedContent(element, rendered))
+        .catch((err) => {
+          console.error('Failed to render markdown:', err);
+          element.textContent = content;
+        });
+    } else {
+      applyRenderedContent(element, maybeRendered);
+    }
   } catch (err) {
     console.error('Failed to render markdown:', err);
     element.textContent = content;
   }
+}
+
+function applyRenderedContent(element, rendered) {
+  element.innerHTML = rendered != null ? rendered : '';
+  element.querySelectorAll('a').forEach((anchor) => {
+    anchor.setAttribute('target', '_blank');
+    anchor.setAttribute('rel', 'noopener noreferrer');
+  });
 }
 
 function updateSidebarState(collapsed) {

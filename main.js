@@ -34,6 +34,8 @@ let settings = null;
 let settingsLoaded = false;
 let settingsPath;
 
+const activeRequests = new Map();
+
 app.whenReady().then(async () => {
   await Promise.all([ensureSettingsLoaded(), ensureChatsLoaded()]);
   createWindow();
@@ -119,6 +121,21 @@ ipcMain.handle('get-chat', async (_event, { chatId }) => {
   return chat ? sanitizeChat(chat) : null;
 });
 
+ipcMain.handle('cancel-ollama', async (_event, { requestId }) => {
+  if (!requestId) {
+    return { success: false };
+  }
+
+  const controller = activeRequests.get(requestId);
+  if (controller) {
+    controller.abort();
+    activeRequests.delete(requestId);
+    return { success: true };
+  }
+
+  return { success: false };
+});
+
 ipcMain.handle('render-markdown', async (_event, text) => {
   try {
     return marked.parse(String(text || ''));
@@ -176,13 +193,18 @@ ipcMain.handle('export-chat', async (_event, { chatId, format }) => {
   return { error: 'Unsupported format' };
 });
 
-ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt }) => {
+ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId }) => {
   if (!prompt?.trim()) {
     return { chatId, error: 'Prompt is empty' };
   }
 
   await ensureChatsLoaded();
   await ensureSettingsLoaded();
+
+  const controller = new AbortController();
+  if (requestId) {
+    activeRequests.set(requestId, controller);
+  }
 
   let chat = chatId ? chatsCache.find((item) => item.id === chatId) : null;
   if (!chat) {
@@ -262,6 +284,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt }) => {
         messages: messagesForModel,
         stream: true,
       }),
+      signal: controller.signal,
     });
 
     if (!response.ok) {
@@ -317,6 +340,19 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt }) => {
       processLine(buffer);
     }
   } catch (err) {
+    if (requestId) {
+      activeRequests.delete(requestId);
+    }
+
+    if (err.name === 'AbortError') {
+      event.sender.send('ollama-stream', {
+        chatId,
+        aborted: true,
+        done: true,
+      });
+      return { chatId, aborted: true };
+    }
+
     console.error('Error querying Ollama:', err);
     event.sender.send('ollama-stream', {
       chatId,
@@ -324,6 +360,10 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt }) => {
       done: true,
     });
     return { chatId, error: 'Error: Unable to get response' };
+  }
+
+  if (requestId) {
+    activeRequests.delete(requestId);
   }
 
   const trimmedAnswer = assistantContent.trim();
@@ -857,6 +897,7 @@ function buildContextInstruction({ context, retrievedAt, genericFresh }) {
   const lines = [
     'Incorporate the verified facts from the context below when answering.',
     'Never invent information that is not supported by the context or prior conversation.',
+    'If the web context directly answers the question, use it; otherwise fall back to the prior conversation.',
   ];
 
   if (genericFresh) {

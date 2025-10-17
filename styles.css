@@ -283,6 +283,57 @@ body.sidebar-collapsed #chatPane {
   color: #dbe5ff;
 }
 
+.message-text a {
+  color: #9cb6ff;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+}
+
+.message-text a:hover {
+  color: #c5d6ff;
+}
+
+.message-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.stop-generation-btn {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 99, 132, 0.45);
+  background: rgba(255, 99, 132, 0.18);
+  color: #ffc7d1;
+  cursor: pointer;
+  transition: background 0.2s ease, border 0.2s ease, transform 0.1s ease;
+}
+
+.stop-generation-btn:hover:not(:disabled) {
+  background: rgba(255, 99, 132, 0.3);
+  border-color: rgba(255, 99, 132, 0.6);
+  transform: translateY(-1px);
+}
+
+.stop-generation-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+body.theme-light .stop-generation-btn {
+  background: rgba(255, 99, 132, 0.18);
+  border: 1px solid rgba(255, 99, 132, 0.35);
+  color: #a82037;
+}
+
+body.theme-light .stop-generation-btn:hover:not(:disabled) {
+  background: rgba(255, 99, 132, 0.28);
+  border-color: rgba(255, 99, 132, 0.5);
+}
+
 details.thoughts {
   background: rgba(15, 16, 19, 0.6);
   border-radius: 10px;
@@ -610,6 +661,8 @@ body.theme-light .model-controls label {
 }
 
 body.theme-light #chatArea {
+  background: radial-gradient(circle at top right, rgba(92, 141, 255, 0.18), rgba(255, 255, 255, 0.6) 60%);
+}
 
 body.theme-light .empty-state {
   color: rgba(28, 28, 30, 0.7);
@@ -617,8 +670,6 @@ body.theme-light .empty-state {
 
 body.theme-light .empty-state small {
   color: rgba(28, 28, 30, 0.55);
-}
-  background: radial-gradient(circle at top right, rgba(92, 141, 255, 0.18), rgba(255, 255, 255, 0.6) 60%);
 }
 
 body.theme-light .message.bot {
@@ -636,6 +687,14 @@ body.theme-light .message-text code {
   background: rgba(92, 141, 255, 0.15);
   border: 1px solid rgba(92, 141, 255, 0.3);
   color: #1c1c1e;
+}
+
+body.theme-light .message-text a {
+  color: #2f63e2;
+}
+
+body.theme-light .message-text a:hover {
+  color: #244bb0;
 }
 
 body.theme-light details.thoughts {

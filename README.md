@@ -9,7 +9,8 @@ Desktop chat interface for running local large language models through [Ollama](
  - “Thoughts” panel that exposes the assistant’s current step (searching, context retrieved, etc.).
  - Real web search integration powered by DuckDuckGo HTML scraping (no API key required).
  - Smart search planning that expands broad prompts (e.g., “latest news”) into focused queries for richer context.
- - Conversation export to Markdown/PDF, quick web-search and hide-chats pills, and a configurable theme picker.
+ - Quick header controls (New Chat, web-search toggle, hide chats) plus a configurable theme picker.
+ - Streaming controls with a Stop button and rich Markdown rendering (code blocks, hyperlinks).
  - Local-first storage of every conversation in `app.getPath('userData')`.
 
 ## Requirements
@@ -44,7 +45,7 @@ This launches the Electron app with auto-reload enabled. Edit the files under `o
 3. Select one of the locally installed Ollama models (models are discovered via `GET /api/tags`).
 4. Type a prompt and press **Send** or hit **Enter** (use **Shift+Enter** for a newline).
 5. The main process decides whether to augment the prompt with live context. If it does, it plans a set of DuckDuckGo queries (broad requests like “latest news” are expanded automatically), scrapes the top snippets with `cheerio`, and streams a reply from Ollama’s `/api/chat`.
-6. Responses arrive in real time; open the “Thoughts” disclosure under each assistant reply to inspect the retrieved context.
+6. Responses arrive in real time; use the **Stop** button beside a live response to cancel long generations, and open the “Thoughts” disclosure to inspect retrieved context.
 7. Use the header pills to toggle **Web Search** (defaults to on) and **Hide Chats**. Open the gear icon to adjust additional preferences.
 
 Chats are saved automatically and reloaded when you reopen the application.
@@ -99,10 +100,9 @@ Delete those files to clear the history and reset settings.
 
 ## Future Enhancements
 
-- Conversation export (Markdown/PDF) for sharing transcripts.
-- Local vector store to ground models on personal notes or documents.
+ - Local vector store to ground models on personal notes or documents.
 - Theme picker (light/dark/system) and compact density modes.
-- Per-model defaults, temperature controls, and advanced Ollama parameters.
+ - Per-model defaults, temperature controls, and advanced Ollama parameters.
 
 ## Project Structure
 
