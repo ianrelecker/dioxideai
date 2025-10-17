@@ -9,21 +9,27 @@
 <body>
   <div class="app-shell">
     <aside id="sidebar" aria-label="Saved chats">
-      <div class="sidebar-header">
-        <button id="newChatBtn" type="button">+ New Chat</button>
-      </div>
       <nav id="chatList" aria-label="Chat history"></nav>
     </aside>
 
     <section id="chatPane">
       <header>
         <div class="model-controls">
+          <button id="newChatBtn" type="button" aria-label="Start new chat">+ New Chat</button>
           <label for="modelSelect">Model:</label>
           <select id="modelSelect" aria-label="Ollama model selector"></select>
           <button id="refreshModels" type="button" aria-label="Refresh models list">↻</button>
         </div>
         <div id="chatTitle" aria-live="polite"></div>
         <div class="header-actions">
+          <button
+            id="sidebarToggleBtn"
+            type="button"
+            aria-pressed="false"
+            aria-label="Toggle chat history sidebar"
+          >
+            Hide Chats
+          </button>
           <button
             id="webSearchToggleBtn"
             type="button"
@@ -102,15 +108,29 @@
           </label>
         </fieldset>
 
-        <section class="settings-note">
-          <h3>Ideas for what’s next</h3>
-          <ul>
-            <li>Conversation export (Markdown/PDF)</li>
-            <li>Local vector store for personal notes</li>
-            <li>Theme picker with light/dark/system modes</li>
-            <li>Per-model defaults and temperature controls</li>
-          </ul>
-        </section>
+        <fieldset>
+          <legend>Appearance</legend>
+          <label class="setting-select" for="themeSelect">
+            <span>
+              <strong>Theme</strong>
+              <small>Choose light, dark, or follow system settings.</small>
+            </span>
+            <select id="themeSelect">
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+
+          <label class="setting-toggle">
+            <input type="checkbox" id="sidebarCollapseToggle" />
+            <span>
+              <strong>Hide chat history sidebar</strong>
+              <small>Collapse the previous chats panel by default.</small>
+            </span>
+          </label>
+        </fieldset>
+
       </form>
     </section>
   </div>

@@ -5,6 +5,7 @@ const exposeAPI = {
   askOllama: (payload) => ipcRenderer.invoke('ask-ollama', payload),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (settings) => ipcRenderer.invoke('update-settings', settings),
+  exportChat: ({ chatId, format }) => ipcRenderer.invoke('export-chat', { chatId, format }),
   listChats: () => ipcRenderer.invoke('list-chats'),
   createChat: (model) => ipcRenderer.invoke('create-chat', { model }),
   getChat: (chatId) => ipcRenderer.invoke('get-chat', { chatId }),
@@ -18,6 +19,7 @@ const exposeAPI = {
     ipcRenderer.on('ollama-thinking', listener);
     return () => ipcRenderer.removeListener('ollama-thinking', listener);
   },
+  renderMarkdown: (text) => ipcRenderer.invoke('render-markdown', text),
 };
 
 contextBridge.exposeInMainWorld('api', exposeAPI);

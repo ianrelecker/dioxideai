@@ -1,10 +1,11 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { promises: fsPromises } = fs;
 const { randomUUID } = require('crypto');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
+const { marked } = require('marked');
 
 // Enable hot-reload during development; ignore failures in production builds.
 try {
@@ -19,6 +20,8 @@ const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
   searchResultLimit: 6,
+  theme: 'system',
+  sidebarCollapsed: false,
 };
 
 const STORE_FILE = 'ollama-electron-chats.json';
@@ -50,6 +53,7 @@ function createWindow() {
   });
 
   win.loadFile('index.html');
+  win.webContents.openDevTools();
 }
 
 app.on('window-all-closed', () => {
@@ -113,6 +117,63 @@ ipcMain.handle('get-chat', async (_event, { chatId }) => {
   await ensureChatsLoaded();
   const chat = chatsCache.find((item) => item.id === chatId);
   return chat ? sanitizeChat(chat) : null;
+});
+
+ipcMain.handle('render-markdown', async (_event, text) => {
+  try {
+    return marked.parse(String(text || ''));
+  } catch (err) {
+    console.error('Failed to render markdown:', err);
+    return String(text || '');
+  }
+});
+
+ipcMain.handle('export-chat', async (_event, { chatId, format }) => {
+  await ensureChatsLoaded();
+
+  const chat = chatsCache.find((item) => item.id === chatId);
+  if (!chat) {
+    return { error: 'Chat not found' };
+  }
+
+  const markdown = buildChatMarkdown(chat);
+  const safeTitle = slugify(chat.title || 'conversation');
+
+  if (format === 'markdown') {
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      defaultPath: path.join(app.getPath('documents'), `${safeTitle}.md`),
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    });
+
+    if (canceled || !filePath) {
+      return { canceled: true };
+    }
+
+    await fsPromises.writeFile(filePath, markdown, 'utf8');
+    return { success: true, filePath };
+  }
+
+  if (format === 'pdf') {
+    const { canceled, filePath } = await dialog.showSaveDialog({
+      defaultPath: path.join(app.getPath('documents'), `${safeTitle}.pdf`),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+
+    if (canceled || !filePath) {
+      return { canceled: true };
+    }
+
+    try {
+      const pdfBuffer = await generatePdfFromMarkdown(markdown, chat.title || 'Conversation');
+      await fsPromises.writeFile(filePath, pdfBuffer);
+      return { success: true, filePath };
+    } catch (err) {
+      console.error('Failed to create PDF:', err);
+      return { error: err.message || 'Unable to export PDF' };
+    }
+  }
+
+  return { error: 'Unsupported format' };
 });
 
 ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt }) => {
@@ -427,6 +488,84 @@ function sanitizeSettings(value) {
   return applySettingsPatch(getDefaultSettings(), value);
 }
 
+function buildChatMarkdown(chat) {
+  const lines = [];
+  lines.push(`# ${chat.title || 'Conversation'}`);
+  lines.push('');
+  lines.push(`- Model: ${chat.model || 'Unknown'}`);
+  lines.push(`- Created: ${chat.createdAt ? formatReadableDate(chat.createdAt) : 'Unknown'}`);
+  lines.push(`- Updated: ${chat.updatedAt ? formatReadableDate(chat.updatedAt) : 'Unknown'}`);
+  lines.push('');
+  (chat.messages || []).forEach((message) => {
+    const roleLabel = message.role === 'assistant' ? 'Assistant' : 'User';
+    lines.push(`## ${roleLabel}`);
+    lines.push('');
+    lines.push(message.content || '');
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
+async function generatePdfFromMarkdown(markdown, title) {
+  const html = createHtmlDocument(markdown, title);
+  const exportWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      offscreen: true,
+    },
+  });
+
+  try {
+    await exportWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    const pdfBuffer = await exportWindow.webContents.printToPDF({
+      printBackground: true,
+      marginsType: 1,
+    });
+    return pdfBuffer;
+  } finally {
+    exportWindow.destroy();
+  }
+}
+
+function createHtmlDocument(markdown, title) {
+  const body = marked.parse(markdown ?? '');
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>${escapeHtml(title)}</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 2.5rem; color: #1c1c1e; }
+      h1, h2, h3, h4 { color: #0f0f10; }
+      h2 { margin-top: 1.8rem; }
+      ul { padding-left: 1.4rem; }
+      pre { background: #f4f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+      code { font-family: 'SFMono-Regular', Menlo, Consolas, monaco, monospace; }
+    </style>
+  </head>
+  <body>
+    ${body}
+  </body>
+</html>`;
+}
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function slugify(value) {
+  return String(value || 'conversation')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60) || 'conversation';
+}
+
 function applySettingsPatch(base, partial) {
   const next = { ...base };
   if (!partial || typeof partial !== 'object') {
@@ -445,6 +584,14 @@ function applySettingsPatch(base, partial) {
     next.searchResultLimit = clampSearchLimit(Number(partial.searchResultLimit));
   }
 
+  if (partial.theme !== undefined) {
+    next.theme = normalizeTheme(partial.theme);
+  }
+
+  if (partial.sidebarCollapsed !== undefined) {
+    next.sidebarCollapsed = Boolean(partial.sidebarCollapsed);
+  }
+
   return next;
 }
 
@@ -457,6 +604,14 @@ function getEffectiveSettings() {
 function clampSearchLimit(value) {
   const numeric = Number.isFinite(value) ? value : DEFAULT_SETTINGS.searchResultLimit;
   return Math.max(1, Math.min(12, Math.round(numeric)));
+}
+
+function normalizeTheme(theme) {
+  const allowed = ['system', 'light', 'dark'];
+  if (allowed.includes(theme)) {
+    return theme;
+  }
+  return DEFAULT_SETTINGS.theme;
 }
 
 function shouldUseWebSearch(prompt) {

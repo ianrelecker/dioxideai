@@ -23,26 +23,6 @@ body {
   border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.sidebar-header {
-  padding: 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-#newChatBtn {
-  width: 100%;
-  padding: 0.75rem;
-  font-size: 0.95rem;
-  color: #0f1013;
-  background: #5c8dff;
-  border: none;
-  border-radius: 8px;
-  cursor: pointer;
-  transition: background 0.2s ease;
-}
-
-#newChatBtn:hover {
-  background: #7aa0ff;
-}
 
 #chatList {
   flex: 1;
@@ -104,6 +84,28 @@ body {
   gap: 0.5rem;
 }
 
+#newChatBtn {
+  padding: 0.45rem 0.9rem;
+  font-size: 0.9rem;
+  border-radius: 8px;
+  border: none;
+  background: linear-gradient(135deg, #5c7cff, #8e9eff);
+  color: #ffffff;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.2s ease;
+  order: -1;
+}
+
+#newChatBtn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 16px rgba(92, 141, 255, 0.35);
+}
+
+#newChatBtn:active {
+  transform: translateY(0);
+  box-shadow: 0 3px 10px rgba(92, 141, 255, 0.45);
+}
+
 .model-controls label {
   font-size: 0.85rem;
   color: rgba(245, 245, 247, 0.7);
@@ -146,6 +148,7 @@ body {
   gap: 0.75rem;
 }
 
+#sidebarToggleBtn,
 #webSearchToggleBtn,
 #settingsBtn {
   cursor: pointer;
@@ -154,6 +157,11 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.2);
   background: rgba(255, 255, 255, 0.08);
   color: #f5f5f7;
+}
+
+#sidebarToggleBtn {
+  padding: 0.45rem 0.8rem;
+  font-size: 0.85rem;
 }
 
 #webSearchToggleBtn {
@@ -186,6 +194,14 @@ body {
   background: rgba(255, 82, 82, 0.2);
   border-color: rgba(255, 82, 82, 0.5);
   color: #ffb3b3;
+}
+
+body.sidebar-collapsed #sidebar {
+  display: none;
+}
+
+body.sidebar-collapsed #chatPane {
+  flex: 1;
 }
 
 #chatArea {
@@ -238,6 +254,33 @@ body {
 .message-text {
   white-space: pre-wrap;
   font-size: 0.98rem;
+  word-break: break-word;
+}
+
+.message-text pre {
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 0.75rem;
+  margin: 0;
+  border-radius: 8px;
+  background: rgba(15, 16, 19, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.message-text pre code {
+  background: none;
+  padding: 0;
+  border: none;
+  color: inherit;
+}
+
+.message-text code {
+  font-family: 'SFMono-Regular', Menlo, Consolas, 'Courier New', monospace;
+  background: rgba(92, 141, 255, 0.18);
+  border: 1px solid rgba(92, 141, 255, 0.25);
+  padding: 0.15rem 0.35rem;
+  border-radius: 6px;
+  color: #dbe5ff;
 }
 
 details.thoughts {
@@ -458,19 +501,205 @@ body.settings-open {
   margin-top: 0.2rem;
 }
 
-.settings-note h3 {
-  margin: 0 0 0.5rem;
-  font-size: 0.95rem;
-  color: rgba(245, 245, 247, 0.85);
+
+
+
+
+.setting-select {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
-.settings-note ul {
-  margin: 0;
-  padding-left: 1.1rem;
-  font-size: 0.85rem;
-  line-height: 1.6;
-  color: rgba(245, 245, 247, 0.7);
+.setting-select strong {
+  font-size: 0.95rem;
+  color: #f5f5f7;
 }
+
+.setting-select small {
+  font-size: 0.75rem;
+  color: rgba(245, 245, 247, 0.65);
+}
+
+.setting-select select {
+  font-size: 0.95rem;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.25);
+  color: inherit;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+body.theme-light {
+  background: #f5f5f7;
+  color: #1c1c1e;
+  color-scheme: light;
+}
+
+body.theme-dark {
+  color-scheme: dark;
+}
+
+body.theme-light #sidebar {
+  background: #f2f5fb;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  color: #1c1c1e;
+}
+
+body.theme-light #sidebar .chat-item {
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light #sidebar .chat-item:hover,
+body.theme-light #sidebar .chat-item.active {
+  border-color: rgba(92, 141, 255, 0.6);
+  background: rgba(92, 141, 255, 0.25);
+}
+
+body.theme-light .chat-item-title {
+  color: #1c1c1e;
+}
+
+body.theme-light .chat-item-meta {
+  color: rgba(28, 28, 30, 0.65);
+}
+
+body.theme-light #chatPane {
+  background: #ffffff;
+  color: #1c1c1e;
+}
+
+body.theme-light #chatPane > header {
+  background: rgba(255, 255, 255, 0.9);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  color: #1c1c1e;
+}
+
+body.theme-light #newChatBtn {
+  background: linear-gradient(135deg, #5c7cff, #7fa4ff);
+  color: #ffffff;
+}
+
+body.theme-light #chatTitle {
+  color: rgba(40, 40, 45, 0.7);
+}
+
+body.theme-light .model-controls label {
+  color: rgba(28, 28, 30, 0.7);
+}
+
+body.theme-light #chatArea {
+
+body.theme-light .empty-state {
+  color: rgba(28, 28, 30, 0.7);
+}
+
+body.theme-light .empty-state small {
+  color: rgba(28, 28, 30, 0.55);
+}
+  background: radial-gradient(circle at top right, rgba(92, 141, 255, 0.18), rgba(255, 255, 255, 0.6) 60%);
+}
+
+body.theme-light .message.bot {
+  background: rgba(244, 244, 247, 0.95);
+  color: #1c1c1e;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light .message-text pre {
+  background: rgba(244, 244, 247, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light .message-text code {
+  background: rgba(92, 141, 255, 0.15);
+  border: 1px solid rgba(92, 141, 255, 0.3);
+  color: #1c1c1e;
+}
+
+body.theme-light details.thoughts {
+  background: rgba(240, 240, 245, 0.9);
+  border: 1px solid rgba(92, 141, 255, 0.25);
+}
+
+body.theme-light .thoughts-text {
+  color: rgba(40, 40, 45, 0.75);
+}
+
+body.theme-light #inputForm {
+  background: rgba(248, 248, 252, 0.95);
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light #promptInput {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  color: inherit;
+}
+
+body.theme-light #webSearchToggleBtn.off {
+  background: rgba(255, 82, 82, 0.12);
+  border-color: rgba(255, 82, 82, 0.35);
+  color: #b32020;
+}
+
+body.theme-light #settingsPanel,
+body.theme-light .settings-panel {
+  background: #ffffff;
+  color: #1c1c1e;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light #settingsCloseBtn,
+body.theme-light #webSearchToggleBtn,
+body.theme-light #sidebarToggleBtn,
+body.theme-light #settingsBtn {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.05);
+  color: #1c1c1e;
+}
+
+body.theme-light .setting-select,
+body.theme-light .setting-toggle,
+body.theme-light .setting-range {
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light .setting-select select {
+  background: rgba(255, 255, 255, 0.95);
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  color: #1c1c1e;
+}
+
+
+
+
+
+
+
+
 
 @media (max-width: 960px) {
   #sidebar {

@@ -1,27 +1,35 @@
-const modelSelect = document.getElementById('modelSelect');
-const refreshModelsButton = document.getElementById('refreshModels');
-const chatTitleEl = document.getElementById('chatTitle');
-const chatListNav = document.getElementById('chatList');
-const newChatButton = document.getElementById('newChatBtn');
-const chatArea = document.getElementById('chatArea');
-const promptInput = document.getElementById('promptInput');
-const inputForm = document.getElementById('inputForm');
-const sendButton = document.getElementById('sendBtn');
-const webSearchToggleBtn = document.getElementById('webSearchToggleBtn');
-const settingsButton = document.getElementById('settingsBtn');
-const settingsOverlay = document.getElementById('settingsOverlay');
-const settingsPanel = document.getElementById('settingsPanel');
-const settingsCloseButton = document.getElementById('settingsCloseBtn');
-const settingsForm = document.getElementById('settingsForm');
-const autoWebSearchToggle = document.getElementById('autoWebSearchToggle');
-const openThoughtsToggle = document.getElementById('openThoughtsToggle');
-const searchResultLimitInput = document.getElementById('searchResultLimit');
-const searchResultValue = document.getElementById('searchResultValue');
+let modelSelect;
+let refreshModelsButton;
+let chatTitleEl;
+let chatListNav;
+let newChatButton;
+let chatArea;
+let promptInput;
+let inputForm;
+let sendButton;
+let sidebarToggleBtn;
+let webSearchToggleBtn;
+let settingsButton;
+let settingsOverlay;
+let settingsPanel;
+let settingsCloseButton;
+let settingsForm;
+let autoWebSearchToggle;
+let openThoughtsToggle;
+let searchResultLimitInput;
+let searchResultValue;
+let themeSelect;
+let sidebarCollapseToggle;
+let exportMarkdownBtn;
+let exportPdfBtn;
+let exportStatus;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
   searchResultLimit: 6,
+  theme: 'system',
+  sidebarCollapsed: false,
 };
 
 const state = {
@@ -34,14 +42,52 @@ const state = {
   settingsPanelOpen: false,
 };
 
+const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
 window.addEventListener('DOMContentLoaded', async () => {
-  registerStreamHandlers();
-  registerUIListeners();
-  updateInteractivity();
-  await loadSettings();
-  await populateModels();
-  await initializeChats();
-  promptInput.focus();
+  console.log('DOMContentLoaded fired');
+  console.log('window.api:', window.api);
+
+  modelSelect = document.getElementById('modelSelect');
+  refreshModelsButton = document.getElementById('refreshModels');
+  chatTitleEl = document.getElementById('chatTitle');
+  chatListNav = document.getElementById('chatList');
+  newChatButton = document.getElementById('newChatBtn');
+  chatArea = document.getElementById('chatArea');
+  promptInput = document.getElementById('promptInput');
+  inputForm = document.getElementById('inputForm');
+  sendButton = document.getElementById('sendBtn');
+  sidebarToggleBtn = document.getElementById('sidebarToggleBtn');
+  webSearchToggleBtn = document.getElementById('webSearchToggleBtn');
+  settingsButton = document.getElementById('settingsBtn');
+  settingsOverlay = document.getElementById('settingsOverlay');
+  settingsPanel = document.getElementById('settingsPanel');
+  settingsCloseButton = document.getElementById('settingsCloseBtn');
+  settingsForm = document.getElementById('settingsForm');
+  autoWebSearchToggle = document.getElementById('autoWebSearchToggle');
+  openThoughtsToggle = document.getElementById('openThoughtsToggle');
+  searchResultLimitInput = document.getElementById('searchResultLimit');
+  searchResultValue = document.getElementById('searchResultValue');
+  themeSelect = document.getElementById('themeSelect');
+  sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
+  exportMarkdownBtn = document.getElementById('exportMarkdownBtn');
+  exportPdfBtn = document.getElementById('exportPdfBtn');
+  exportStatus = document.getElementById('exportStatus');
+
+  console.log('DOM elements loaded, starting initialization');
+
+  try {
+    registerStreamHandlers();
+    registerUIListeners();
+    updateInteractivity();
+    await loadSettings();
+    await populateModels();
+    await initializeChats();
+    promptInput.focus();
+    console.log('Initialization complete');
+  } catch (error) {
+    console.error('Initialization failed:', error);
+  }
 });
 
 async function initializeChats() {
@@ -79,6 +125,12 @@ function registerUIListeners() {
     }
   });
 
+  sidebarToggleBtn?.addEventListener('click', () => {
+    const nextValue = !(state.settings?.sidebarCollapsed ?? false);
+    updateSidebarState(nextValue);
+    applySettingsUpdate({ sidebarCollapsed: nextValue });
+  });
+
   settingsButton?.addEventListener('click', openSettingsPanel);
   settingsCloseButton?.addEventListener('click', closeSettingsPanel);
   settingsOverlay?.addEventListener('click', (event) => {
@@ -101,12 +153,25 @@ function registerUIListeners() {
   openThoughtsToggle?.addEventListener('change', () =>
     applySettingsUpdate({ openThoughtsByDefault: openThoughtsToggle.checked })
   );
+  themeSelect?.addEventListener('change', () => {
+    const nextTheme = themeSelect.value;
+    applyTheme(nextTheme);
+    applySettingsUpdate({ theme: nextTheme });
+  });
+  sidebarCollapseToggle?.addEventListener('change', () => {
+    const next = sidebarCollapseToggle.checked;
+    updateSidebarState(next);
+    applySettingsUpdate({ sidebarCollapsed: next });
+  });
   searchResultLimitInput?.addEventListener('input', () =>
     updateSearchResultLabel(Number(searchResultLimitInput.value))
   );
   searchResultLimitInput?.addEventListener('change', () =>
     applySettingsUpdate({ searchResultLimit: Number(searchResultLimitInput.value) })
   );
+
+
+
 
   document.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && state.settingsPanelOpen) {
@@ -144,6 +209,17 @@ function applySettingsToUI() {
     searchResultLimitInput.value = String(limit);
   }
   updateSearchResultLabel(limit);
+
+  if (themeSelect) {
+    themeSelect.value = prefs.theme || 'system';
+  }
+
+  if (sidebarCollapseToggle) {
+    sidebarCollapseToggle.checked = Boolean(prefs.sidebarCollapsed);
+  }
+
+  updateSidebarState(Boolean(prefs.sidebarCollapsed));
+  applyTheme(prefs.theme || DEFAULT_SETTINGS.theme);
 }
 
 function openSettingsPanel() {
@@ -183,6 +259,7 @@ async function applySettingsUpdate(partial) {
 
 function handleQuickWebSearchToggle() {
   const nextValue = !(state.settings?.autoWebSearch ?? true);
+  updateWebSearchButton(nextValue);
   applySettingsUpdate({ autoWebSearch: nextValue });
 }
 
@@ -243,7 +320,7 @@ function registerStreamHandlers() {
     }
 
     if (data.stage === 'search-plan' || data.stage === 'search-started') {
-      entry.setSummary('Thoughts · Planning search');
+      entry.setSummary('Notes');
       entry.openThoughts();
       entry.setThought(
         formatSearchPlanThought({
@@ -252,9 +329,8 @@ function registerStreamHandlers() {
         })
       );
     } else if (data.stage === 'context') {
-      const summary = data.context ? 'Thoughts · Web context' : 'Thoughts · Model memory';
-      entry.setSummary(summary);
-      entry.openThoughts();
+      const hasContext = Boolean(data.context?.trim());
+      entry.setSummary(hasContext ? 'Web Context' : 'Notes');
       entry.setThought(
         formatContextThought({
           message: data.context?.trim()
@@ -265,6 +341,7 @@ function registerStreamHandlers() {
           retrievedAt: data.retrievedAt,
         })
       );
+      entry.closeThoughts();
     }
   });
 }
@@ -342,7 +419,7 @@ async function handlePromptSubmit() {
   const assistantEntry = appendAssistantMessage('Thinking…', {
     open: true,
     thoughts: 'Preparing response…',
-    summary: 'Thoughts · Working',
+    summary: 'Notes',
   });
 
   state.pendingAssistantByChat.set(chatId, assistantEntry);
@@ -365,9 +442,9 @@ async function handlePromptSubmit() {
       return;
     }
 
-    const contextSummary = result.context ? 'Thoughts · Web context' : 'Thoughts';
+    const hasContext = Boolean(result.context);
+    const contextSummary = hasContext ? 'Web Context' : 'Notes';
     assistantEntry.setSummary(contextSummary);
-    assistantEntry.openThoughts();
     assistantEntry.setThought(
       formatContextThought({
         message: result.context
@@ -378,6 +455,9 @@ async function handlePromptSubmit() {
         retrievedAt: result.contextRetrievedAt,
       })
     );
+    if (hasContext) {
+      assistantEntry.closeThoughts();
+    }
 
     recordAssistantMessage(
       result.answer,
@@ -470,7 +550,7 @@ function renderChat(chat) {
       appendAssistantMessage(message.content, {
         open: false,
         thoughts: formatStoredContext(message.meta),
-        summary: usedWeb ? 'Thoughts · Web context' : 'Thoughts',
+        summary: usedWeb ? 'Web Context' : 'Notes',
       });
     }
   });
@@ -530,7 +610,7 @@ function appendAssistantMessage(content, options = {}) {
   const {
     open = openDefault,
     thoughts = '',
-    summary = 'Thoughts',
+    summary = 'Notes',
   } = options;
 
   const container = document.createElement('div');
@@ -538,7 +618,7 @@ function appendAssistantMessage(content, options = {}) {
 
   const text = document.createElement('div');
   text.classList.add('message-text');
-  text.textContent = content;
+  setMessageContent(text, content);
   container.appendChild(text);
 
   const details = document.createElement('details');
@@ -561,10 +641,10 @@ function appendAssistantMessage(content, options = {}) {
   return {
     container,
     setContent: (value) => {
-      text.textContent = value;
+      setMessageContent(text, value);
     },
     setSummary: (value) => {
-      summaryEl.textContent = value || 'Thoughts';
+      summaryEl.textContent = value || 'Notes';
     },
     setThought: (value) => {
       thoughtsText.textContent = value?.trim()
@@ -655,6 +735,9 @@ function updateInteractivity() {
   if (webSearchToggleBtn) {
     webSearchToggleBtn.disabled = state.isStreaming;
   }
+  if (sidebarToggleBtn) {
+    sidebarToggleBtn.disabled = state.isStreaming;
+  }
   if (!state.settingsPanelOpen) {
     settingsButton.disabled = state.isStreaming;
   }
@@ -664,6 +747,9 @@ function updateInteractivity() {
     chatListNav.classList.remove('disabled');
     if (!state.settingsPanelOpen) {
       settingsButton.disabled = false;
+    }
+    if (sidebarToggleBtn) {
+      sidebarToggleBtn.disabled = false;
     }
   }
 }
@@ -755,4 +841,51 @@ function formatChatMeta(chat) {
   const when = updated ? formatter.format(updated) : '';
   const model = chat.model || 'No model';
   return `${model} • ${when}`;
+}
+
+async function setMessageContent(element, value) {
+  const content = value ?? '';
+  try {
+    const rendered = window.api.renderMarkdown
+      ? await window.api.renderMarkdown(content)
+      : content;
+    element.innerHTML = rendered;
+  } catch (err) {
+    console.error('Failed to render markdown:', err);
+    element.textContent = content;
+  }
+}
+
+function updateSidebarState(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  if (sidebarToggleBtn) {
+    sidebarToggleBtn.setAttribute('aria-pressed', String(Boolean(collapsed)));
+    sidebarToggleBtn.textContent = collapsed ? 'Show Chats' : 'Hide Chats';
+  }
+}
+
+function applyTheme(themeSetting) {
+  const resolved = resolveTheme(themeSetting);
+  document.body.classList.toggle('theme-light', resolved === 'light');
+  document.body.classList.toggle('theme-dark', resolved === 'dark');
+}
+
+function resolveTheme(themeSetting) {
+  if (themeSetting === 'system') {
+    return prefersDark && prefersDark.matches ? 'dark' : 'light';
+  }
+  return themeSetting === 'dark' ? 'dark' : 'light';
+}
+
+
+
+
+
+if (prefersDark) {
+  const systemThemeListener = () => applyTheme(state.settings?.theme || DEFAULT_SETTINGS.theme);
+  if (typeof prefersDark.addEventListener === 'function') {
+    prefersDark.addEventListener('change', systemThemeListener);
+  } else if (typeof prefersDark.addListener === 'function') {
+    prefersDark.addListener(systemThemeListener);
+  }
 }
