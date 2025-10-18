@@ -1,7 +1,7 @@
 {
   "name": "dioxideai",
   "version": "1.0.0",
-  "description": "",
+  "description": "Desktop GUI for Ollama-powered chat",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -12,6 +12,10 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ianrelecker/dioxideai.git"
+  },
   "devDependencies": {
     "electron": "^38.3.0",
     "electron-builder": "^25.1.8",
@@ -72,7 +76,9 @@
     },
     "publish": [
       {
-        "provider": "github"
+        "provider": "github",
+        "owner": "ianrelecker",
+        "repo": "dioxideai"
       }
     ]
   }
