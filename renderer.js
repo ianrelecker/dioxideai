@@ -10,7 +10,6 @@ let promptInput;
 let inputForm;
 let sendButton;
 let sidebarToggleBtn;
-let webSearchToggleBtn;
 let settingsButton;
 let settingsOverlay;
 let settingsPanel;
@@ -78,7 +77,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   inputForm = document.getElementById('inputForm');
   sendButton = document.getElementById('sendBtn');
   sidebarToggleBtn = document.getElementById('sidebarToggleBtn');
-  webSearchToggleBtn = document.getElementById('webSearchToggleBtn');
   settingsButton = document.getElementById('settingsBtn');
   settingsOverlay = document.getElementById('settingsOverlay');
   settingsPanel = document.getElementById('settingsPanel');
@@ -165,7 +163,6 @@ function registerUIListeners() {
   autoWebSearchToggle?.addEventListener('change', () =>
     applySettingsUpdate({ autoWebSearch: autoWebSearchToggle.checked })
   );
-  webSearchToggleBtn?.addEventListener('click', handleQuickWebSearchToggle);
   openThoughtsToggle?.addEventListener('change', () =>
     applySettingsUpdate({ openThoughtsByDefault: openThoughtsToggle.checked })
   );
@@ -216,7 +213,7 @@ function applySettingsToUI() {
   if (autoWebSearchToggle) {
     autoWebSearchToggle.checked = Boolean(prefs.autoWebSearch);
   }
-  updateWebSearchButton(Boolean(prefs.autoWebSearch));
+  setWebSearchToggleState(Boolean(prefs.autoWebSearch));
 
   if (openThoughtsToggle) {
     openThoughtsToggle.checked = Boolean(prefs.openThoughtsByDefault);
@@ -275,19 +272,9 @@ async function applySettingsUpdate(partial) {
   }
 }
 
-function handleQuickWebSearchToggle() {
-  const nextValue = !(state.settings?.autoWebSearch ?? true);
-  updateWebSearchButton(nextValue);
-  applySettingsUpdate({ autoWebSearch: nextValue });
-}
-
-function updateWebSearchButton(enabled) {
-  if (!webSearchToggleBtn) {
-    return;
-  }
-  webSearchToggleBtn.setAttribute('aria-pressed', String(Boolean(enabled)));
-  webSearchToggleBtn.textContent = enabled ? 'Web Search: On' : 'Web Search: Off';
-  webSearchToggleBtn.classList.toggle('off', !enabled);
+function setWebSearchToggleState(enabled) {
+  state.settings = state.settings || { ...DEFAULT_SETTINGS };
+  state.settings.autoWebSearch = Boolean(enabled);
 }
 
 function updateSearchResultLabel(value) {
@@ -325,10 +312,7 @@ function registerStreamHandlers() {
 
     if (data.aborted) {
       entry.clearActions();
-      entry.setContent('Generation stopped.');
-      entry.setSummary('Notes');
-      entry.openThoughts();
-      entry.setThought('Generation canceled by user.');
+      entry.stopLoading?.();
       state.pendingAssistantByChat.delete(data.chatId);
       state.isStreaming = false;
       state.activeRequestId = null;
@@ -456,10 +440,11 @@ async function handlePromptSubmit() {
   const requestId = createRequestId();
   const userLinks = extractLinks(prompt);
 
-  const assistantEntry = appendAssistantMessage('Thinking…', {
+  const assistantEntry = appendAssistantMessage('', {
     open: false,
     thoughts: 'Preparing response…',
     summary: 'Notes',
+    loading: true,
   });
 
   const stopButton = document.createElement('button');
@@ -499,10 +484,7 @@ async function handlePromptSubmit() {
     state.activeAssistantEntry = null;
 
     if (result?.aborted) {
-      assistantEntry.setContent('Generation stopped.');
-      assistantEntry.setSummary('Notes');
-      assistantEntry.openThoughts();
-      assistantEntry.setThought('Generation canceled by user.');
+      assistantEntry.stopLoading?.();
       state.pendingAssistantByChat.delete(chatId);
       state.isStreaming = false;
       updateInteractivity();
@@ -511,6 +493,7 @@ async function handlePromptSubmit() {
 
     if (result?.error) {
       assistantEntry.clearActions();
+      assistantEntry.stopLoading?.();
       assistantEntry.setContent(result.error);
       assistantEntry.setSummary('Error');
       assistantEntry.openThoughts();
@@ -534,7 +517,7 @@ async function handlePromptSubmit() {
         retrievedAt: result.contextRetrievedAt,
       })
     );
-    if (hasContext) {
+    if (hasContext ? !(state.settings?.openThoughtsByDefault ?? false) : false) {
       assistantEntry.closeThoughts();
     }
 
@@ -694,6 +677,7 @@ function appendAssistantMessage(content, options = {}) {
     open = openDefault,
     thoughts = '',
     summary = 'Notes',
+    loading = false,
   } = options;
 
   const container = document.createElement('div');
@@ -701,13 +685,27 @@ function appendAssistantMessage(content, options = {}) {
 
   const text = document.createElement('div');
   text.classList.add('message-text');
+  let loadingIndicator = null;
+  let loadingActive = Boolean(loading);
+  const actionBar = document.createElement('div');
+  actionBar.classList.add('message-actions');
+  actionBar.style.display = 'none';
+
+  if (loadingActive) {
+    loadingIndicator = document.createElement('div');
+    loadingIndicator.classList.add('message-loading');
+    loadingIndicator.setAttribute('aria-hidden', 'true');
+    for (let i = 0; i < 3; i += 1) {
+      const dot = document.createElement('span');
+      loadingIndicator.appendChild(dot);
+    }
+    container.classList.add('loading');
+    actionBar.appendChild(loadingIndicator);
+  }
+
   setMessageContent(text, content);
   container.appendChild(text);
-
-  const actions = document.createElement('div');
-  actions.classList.add('message-actions');
-  actions.style.display = 'none';
-  container.appendChild(actions);
+  container.appendChild(actionBar);
 
   const details = document.createElement('details');
   details.classList.add('thoughts');
@@ -727,9 +725,29 @@ function appendAssistantMessage(content, options = {}) {
   chatArea.appendChild(container);
   chatArea.scrollTop = chatArea.scrollHeight;
 
+  const clearLoading = () => {
+    if (loadingIndicator) {
+      loadingIndicator.remove();
+      loadingIndicator = null;
+    }
+    container.classList.remove('loading');
+    loadingActive = false;
+    updateActionBarVisibility();
+  };
+
+  const updateActionBarVisibility = () => {
+    const hasContent = Boolean(loadingIndicator) || actionBar.childElementCount > 0;
+    actionBar.style.display = hasContent ? 'flex' : 'none';
+  };
+
+  updateActionBarVisibility();
+
   return {
     container,
     setContent: (value) => {
+      if (loadingActive && value && value.trim()) {
+        clearLoading();
+      }
       setMessageContent(text, value);
     },
     setSummary: (value) => {
@@ -747,13 +765,16 @@ function appendAssistantMessage(content, options = {}) {
       details.open = false;
     },
     addActionButton: (button) => {
-      actions.style.display = 'flex';
-      actions.appendChild(button);
+      actionBar.appendChild(button);
+      updateActionBarVisibility();
     },
     clearActions: () => {
-      actions.innerHTML = '';
-      actions.style.display = 'none';
+      const buttons = actionBar.querySelectorAll('button');
+      buttons.forEach((btn) => btn.remove());
+      updateActionBarVisibility();
     },
+    stopLoading: clearLoading,
+    getContent: () => text.textContent || '',
   };
 }
 
@@ -830,9 +851,6 @@ function updateInteractivity() {
   promptInput.disabled = state.isStreaming;
   sendButton.disabled = state.isStreaming;
   newChatButton.disabled = state.isStreaming;
-  if (webSearchToggleBtn) {
-    webSearchToggleBtn.disabled = state.isStreaming;
-  }
   if (sidebarToggleBtn) {
     sidebarToggleBtn.disabled = state.isStreaming;
   }

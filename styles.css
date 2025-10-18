@@ -81,7 +81,7 @@ body {
 .model-controls {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.9rem;
 }
 
 #newChatBtn {
@@ -149,7 +149,6 @@ body {
 }
 
 #sidebarToggleBtn,
-#webSearchToggleBtn,
 #settingsBtn {
   cursor: pointer;
   transition: background 0.2s ease, border 0.2s ease;
@@ -164,11 +163,6 @@ body {
   font-size: 0.85rem;
 }
 
-#webSearchToggleBtn {
-  padding: 0.45rem 0.8rem;
-  font-size: 0.85rem;
-}
-
 #settingsBtn {
   width: 2.25rem;
   height: 2.25rem;
@@ -178,22 +172,14 @@ body {
   justify-content: center;
 }
 
-#webSearchToggleBtn:hover:not(:disabled),
 #settingsBtn:hover:not(:disabled) {
   background: rgba(92, 141, 255, 0.4);
   border-color: rgba(92, 141, 255, 0.8);
 }
 
-#webSearchToggleBtn:disabled,
 #settingsBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-}
-
-#webSearchToggleBtn.off {
-  background: rgba(255, 82, 82, 0.2);
-  border-color: rgba(255, 82, 82, 0.5);
-  color: #ffb3b3;
 }
 
 body.sidebar-collapsed #sidebar {
@@ -257,6 +243,42 @@ body.sidebar-collapsed #chatPane {
   word-break: break-word;
   line-height: 1.28;
   overflow-wrap: anywhere;
+}
+
+.message-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.45rem;
+}
+
+.message-loading span {
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: rgba(245, 245, 247, 0.75);
+  animation: messageLoadingPulse 1s infinite ease-in-out;
+}
+
+.message-loading span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.message-loading span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes messageLoadingPulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 1;
+    transform: translateY(-3px);
+  }
 }
 
 .message.bot .message-text {
@@ -348,9 +370,9 @@ body.sidebar-collapsed #chatPane {
 
 .message-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
-  margin-top: 0.35rem;
+  align-items: center;
+  gap: 0.9rem;
+  margin-top: 0.4rem;
 }
 
 .stop-generation-btn {
@@ -780,6 +802,10 @@ body.theme-light .message-text code {
   color: #1c1c1e;
 }
 
+body.theme-light .message-loading span {
+  background: rgba(28, 28, 30, 0.55);
+}
+
 body.theme-light .message-text th,
 body.theme-light .message-text td {
   border: 1px solid rgba(0, 0, 0, 0.12);
@@ -817,12 +843,6 @@ body.theme-light #promptInput {
   color: inherit;
 }
 
-body.theme-light #webSearchToggleBtn.off {
-  background: rgba(255, 82, 82, 0.12);
-  border-color: rgba(255, 82, 82, 0.35);
-  color: #b32020;
-}
-
 body.theme-light #settingsPanel,
 body.theme-light .settings-panel {
   background: #ffffff;
@@ -831,7 +851,6 @@ body.theme-light .settings-panel {
 }
 
 body.theme-light #settingsCloseBtn,
-body.theme-light #webSearchToggleBtn,
 body.theme-light #sidebarToggleBtn,
 body.theme-light #settingsBtn {
   border: 1px solid rgba(0, 0, 0, 0.12);
@@ -974,6 +993,10 @@ body.theme-cream .message-text code {
   color: #7d4314;
 }
 
+body.theme-cream .message-loading span {
+  background: rgba(120, 92, 58, 0.55);
+}
+
 body.theme-cream .message-text th,
 body.theme-cream .message-text td {
   border: 1px solid rgba(120, 92, 58, 0.28);
@@ -1015,12 +1038,6 @@ body.theme-cream #promptInput {
   color: #2b2316;
 }
 
-body.theme-cream #webSearchToggleBtn.off {
-  background: rgba(209, 96, 69, 0.18);
-  border-color: rgba(209, 96, 69, 0.4);
-  color: #a23c21;
-}
-
 body.theme-cream #settingsPanel,
 body.theme-cream .settings-panel {
   background: #fffaf1;
@@ -1029,7 +1046,6 @@ body.theme-cream .settings-panel {
 }
 
 body.theme-cream #settingsCloseBtn,
-body.theme-cream #webSearchToggleBtn,
 body.theme-cream #sidebarToggleBtn,
 body.theme-cream #settingsBtn {
   border: 1px solid rgba(120, 92, 58, 0.25);

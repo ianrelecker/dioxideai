@@ -1,5 +1,5 @@
 {
-  "name": "ollama-electron-gui",
+  "name": "dioxideai",
   "version": "1.0.0",
   "description": "",
   "main": "main.js",
@@ -24,8 +24,8 @@
     "node-fetch": "^2.7.0"
   },
   "build": {
-    "appId": "com.livellm.ollamaelectron",
-    "productName": "Ollama Electron GUI",
+    "appId": "com.livellm.dioxideai",
+    "productName": "DioxideAi",
     "files": [
       "index.html",
       "main.js",

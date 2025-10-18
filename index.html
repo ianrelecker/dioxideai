@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Ollama Chat GUI</title>
+  <title>DioxideAi</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -17,7 +17,7 @@
         <div class="model-controls">
           <button id="newChatBtn" type="button" aria-label="Start new chat">+ New Chat</button>
           <label for="modelSelect">Model:</label>
-          <select id="modelSelect" aria-label="Ollama model selector"></select>
+          <select id="modelSelect" aria-label="DioxideAi model selector"></select>
           <button id="refreshModels" type="button" aria-label="Refresh models list">↻</button>
         </div>
         <div id="chatTitle" aria-live="polite"></div>
@@ -29,14 +29,6 @@
             aria-label="Toggle chat history sidebar"
           >
             Hide Chats
-          </button>
-          <button
-            id="webSearchToggleBtn"
-            type="button"
-            aria-pressed="true"
-            aria-label="Toggle automatic web search"
-          >
-            Web Search: On
           </button>
           <button
             id="settingsBtn"

@@ -29,8 +29,10 @@ const DEFAULT_SETTINGS = {
   sidebarCollapsed: false,
 };
 
-const STORE_FILE = 'ollama-electron-chats.json';
-const SETTINGS_FILE = 'ollama-electron-settings.json';
+const STORE_FILE = 'dioxideai-chats.json';
+const SETTINGS_FILE = 'dioxideai-settings.json';
+const LEGACY_STORE_FILES = ['ollama-electron-chats.json'];
+const LEGACY_SETTINGS_FILES = ['ollama-electron-settings.json'];
 
 let chatsCache = [];
 let chatsLoaded = false;
@@ -689,17 +691,45 @@ async function ensureSettingsLoaded() {
     return;
   }
 
-  settingsPath = path.join(app.getPath('userData'), SETTINGS_FILE);
+  const userDataPath = app.getPath('userData');
+  settingsPath = path.join(userDataPath, SETTINGS_FILE);
 
   try {
     const contents = await fsPromises.readFile(settingsPath, 'utf8');
     const parsed = JSON.parse(contents);
     settings = sanitizeSettings(parsed);
   } catch (err) {
-    if (err.code !== 'ENOENT') {
+    if (err.code === 'ENOENT') {
+      let migrated = false;
+      for (const legacyFile of LEGACY_SETTINGS_FILES) {
+        const legacyPath = path.join(userDataPath, legacyFile);
+        try {
+          const legacyContents = await fsPromises.readFile(legacyPath, 'utf8');
+          const parsed = JSON.parse(legacyContents);
+          settings = sanitizeSettings(parsed);
+          migrated = true;
+          try {
+            await fsPromises.mkdir(path.dirname(settingsPath), { recursive: true });
+            await fsPromises.writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+            await fsPromises.unlink(legacyPath).catch(() => {});
+          } catch (persistErr) {
+            console.warn('Failed to migrate legacy settings file:', persistErr);
+          }
+          break;
+        } catch (legacyErr) {
+          if (legacyErr.code !== 'ENOENT') {
+            console.error('Failed to load legacy settings file:', legacyErr);
+          }
+        }
+      }
+
+      if (!migrated) {
+        settings = getDefaultSettings();
+      }
+    } else {
       console.error('Failed to load settings:', err);
+      settings = getDefaultSettings();
     }
-    settings = getDefaultSettings();
   }
 
   settingsLoaded = true;
@@ -710,7 +740,8 @@ async function ensureChatsLoaded() {
     return;
   }
 
-  storagePath = path.join(app.getPath('userData'), STORE_FILE);
+  const userDataPath = app.getPath('userData');
+  storagePath = path.join(userDataPath, STORE_FILE);
 
   try {
     const contents = await fsPromises.readFile(storagePath, 'utf8');
@@ -724,10 +755,42 @@ async function ensureChatsLoaded() {
       chatsCache = [];
     }
   } catch (err) {
-    if (err.code !== 'ENOENT') {
+    if (err.code === 'ENOENT') {
+      let migrated = false;
+      for (const legacyFile of LEGACY_STORE_FILES) {
+        const legacyPath = path.join(userDataPath, legacyFile);
+        try {
+          const legacyContents = await fsPromises.readFile(legacyPath, 'utf8');
+          const parsed = JSON.parse(legacyContents);
+          chatsCache = Array.isArray(parsed)
+            ? parsed.map((chat) => ({
+                ...chat,
+                initialUserPrompt: typeof chat.initialUserPrompt === 'string' ? chat.initialUserPrompt : '',
+              }))
+            : [];
+          migrated = true;
+          try {
+            await fsPromises.mkdir(path.dirname(storagePath), { recursive: true });
+            await fsPromises.writeFile(storagePath, JSON.stringify(chatsCache, null, 2), 'utf8');
+            await fsPromises.unlink(legacyPath).catch(() => {});
+          } catch (persistErr) {
+            console.warn('Failed to migrate legacy chats file:', persistErr);
+          }
+          break;
+        } catch (legacyErr) {
+          if (legacyErr.code !== 'ENOENT') {
+            console.error('Failed to load legacy chats file:', legacyErr);
+          }
+        }
+      }
+
+      if (!migrated) {
+        chatsCache = [];
+      }
+    } else {
       console.error('Failed to load chats:', err);
+      chatsCache = [];
     }
-    chatsCache = [];
   }
 
   chatsLoaded = true;

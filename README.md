@@ -1,6 +1,6 @@
-# Ollama Electron Chat GUI
+# DioxideAi
 
-Desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with optional live web context pulled directly from DuckDuckGo search results.
+DioxideAi is a desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with optional live web context pulled directly from DuckDuckGo search results.
 
 ## Highlights
 
@@ -9,7 +9,7 @@ Desktop chat interface for running local large language models through [Ollama](
  - “Thoughts” panel that exposes the assistant’s current step (searching, context retrieved, etc.).
  - Real web search integration powered by DuckDuckGo HTML scraping (no API key required).
  - Smart search planning that expands broad prompts (e.g., “latest news”) into focused queries for richer context.
- - Quick header controls (New Chat, web-search toggle, hide chats) plus a configurable theme picker.
+ - Quick header controls (New Chat, hide chats) plus a configurable theme picker.
  - Streaming controls with a Stop button and rich Markdown rendering (code blocks, hyperlinks).
  - Drop links directly into prompts; they’re added to the context alongside web results.
  - Built-in macOS packaging with auto-updates served from GitHub Releases.
@@ -26,7 +26,7 @@ Desktop chat interface for running local large language models through [Ollama](
 
 ```bash
 git clone <this repo>
-cd ollama-electron-gui
+cd dioxideai
 npm install
 ```
 
@@ -38,7 +38,7 @@ Ensure the Ollama service is active (`ps aux | grep ollama` or run `ollama serve
 npm run dev
 ```
 
-This launches the Electron app with auto-reload enabled. Edit the files under `ollama-electron-gui/` and the window will refresh automatically.
+This launches the Electron app with auto-reload enabled. Edit the files under `dioxideai/` and the window will refresh automatically.
 
 ## Usage
 
@@ -64,7 +64,7 @@ Click the gear icon in the chat header to open the modal preferences panel:
 - **Delete all chats** – wipe every saved conversation (creates a fresh empty chat immediately).
 - **Export conversation** – save the current chat as Markdown or PDF.
 
-Preferences persist in `~/Library/Application Support/ollama-electron-gui/ollama-electron-settings.json`.
+Preferences persist in `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.
 
 ## Packaging & Updates (macOS)
 
@@ -80,7 +80,7 @@ This project ships with an [electron-builder](https://www.electron.build/) setup
 
    Outputs land inside the `dist/` directory: signed `.dmg` and `.zip` artifacts plus the `.app`.
 
-4. Notarize the `Ollama Electron GUI.app` and DMG (e.g., via `xcrun notarytool submit --keychain-profile …`). After notarization, staple the ticket: `xcrun stapler staple dist/Ollama\ Electron\ GUI.dmg`.
+4. Notarize the `DioxideAi.app` and DMG (e.g., via `xcrun notarytool submit --keychain-profile …`). After notarization, staple the ticket: `xcrun stapler staple dist/DioxideAi.dmg`.
 5. Publish the generated `latest-mac.yml` and artifacts (DMG/ZIP) to your release endpoint. Auto-updates run only in packaged builds and will download/apply new releases automatically, prompting the user to restart once ready.
 
 If you need a custom DMG background or icon, place assets under `build/` and update the `build` section of `package.json`.
@@ -95,9 +95,9 @@ If you need a custom DMG background or icon, place assets under `build/` and upd
 
 Chat logs are serialized to JSON at:
 
-- **macOS**: `~/Library/Application Support/ollama-electron-gui/ollama-electron-chats.json`
+- **macOS**: `~/Library/Application Support/DioxideAi/dioxideai-chats.json`
 
-Preferences live alongside chats in `~/Library/Application Support/ollama-electron-gui/ollama-electron-settings.json`.
+Preferences live alongside chats in `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.
 
 Delete those files to clear the history and reset settings.
 
@@ -117,7 +117,7 @@ Delete those files to clear the history and reset settings.
 ## Project Structure
 
 ```
-ollama-electron-gui/
+dioxideai/
 ├── main.js        # Electron main process, Ollama + search integration
 ├── preload.js     # Secure IPC bridge for renderer
 ├── renderer.js    # Chat UI logic
