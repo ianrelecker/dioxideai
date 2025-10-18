@@ -341,15 +341,22 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
 
   chat.model = model;
 
+  if (!chat.initialUserPrompt) {
+    const firstUserMessage = chat.messages.find((message) => message.role === 'user' && message.content);
+    chat.initialUserPrompt = firstUserMessage?.content || prompt;
+  }
+
   const now = new Date().toISOString();
   const historyMessages = chat.messages.map(({ role, content }) => ({ role, content }));
 
   const effectiveSettings = getEffectiveSettings();
   const searchPrompt = buildSearchPrompt(chat, prompt);
   const focusTerms = deriveFollowUpFocus(chat, prompt);
+  const initialGoal = chat.initialUserPrompt ? String(chat.initialUserPrompt).trim() : '';
   const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt, {
     hasRecentContext: hasRecentWebContext(chat),
     focusTerms,
+    initialGoal,
   });
   let contextResult = { text: '', entries: [], queries: [], retrievedAt: null };
   let contextMessage = '';
@@ -422,6 +429,13 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     { role: 'system', content: buildBaseSystemPrompt() },
     ...historyMessages,
   ];
+
+  if (initialGoal) {
+    messagesForModel.splice(1, 0, {
+      role: 'system',
+      content: buildGoalInstruction(initialGoal, prompt),
+    });
+  }
 
   if (contextResult.text) {
     messagesForModel.push({
@@ -662,6 +676,7 @@ function createChatRecord(model = null) {
     createdAt: now,
     updatedAt: now,
     messages: [],
+    initialUserPrompt: '',
   };
 }
 
@@ -701,7 +716,10 @@ async function ensureChatsLoaded() {
     const contents = await fsPromises.readFile(storagePath, 'utf8');
     const parsed = JSON.parse(contents);
     if (Array.isArray(parsed)) {
-      chatsCache = parsed;
+      chatsCache = parsed.map((chat) => ({
+        ...chat,
+        initialUserPrompt: typeof chat.initialUserPrompt === 'string' ? chat.initialUserPrompt : '',
+      }));
     } else {
       chatsCache = [];
     }
@@ -1168,9 +1186,12 @@ function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '',
   if (directiveQuery) {
     queries = [directiveQuery];
   } else if (focusTerms.length) {
-    queries = buildQueriesFromFocusTerms(focusTerms, trimmedUserPrompt || basePrompt);
+    queries = buildQueriesFromFocusTerms(focusTerms, trimmedUserPrompt || basePrompt, options.initialGoal);
   } else {
     queries = generateSearchQueries(basePrompt);
+  }
+  if (options.initialGoal) {
+    queries.push(options.initialGoal);
   }
   queries = Array.from(new Set(queries.filter(Boolean)));
 
@@ -1389,6 +1410,21 @@ function buildBaseSystemPrompt() {
   ].join(' ');
 }
 
+function buildGoalInstruction(initialGoal, latestPrompt) {
+  const lines = [
+    'Conversation objective:',
+    initialGoal,
+    '',
+    'Every answer should support this original goal. Use follow-up questions to refine or extend the same objective, not to replace it.',
+  ];
+
+  if (latestPrompt && latestPrompt.trim() && latestPrompt.length < 240) {
+    lines.push('', 'Latest user request:', latestPrompt.trim());
+  }
+
+  return lines.join('\n');
+}
+
 function buildContextInstruction({ context, retrievedAt, genericFresh }) {
   const lines = [
     'Incorporate the verified facts from the context below when answering.',
@@ -1502,7 +1538,10 @@ function buildSearchPrompt(chat, currentPrompt) {
   }
 
   const firstUser = userMessages[0];
-  contextParts.push(`Initial question: ${firstUser.content}`);
+  const initialGoal = chat.initialUserPrompt || firstUser?.content;
+  if (initialGoal) {
+    contextParts.push(`Primary goal: ${initialGoal}`);
+  }
 
   const lastAssistant = [...(chat.messages || [])].reverse().find((msg) => msg.role === 'assistant');
   if (lastAssistant?.meta?.context) {
@@ -1611,6 +1650,10 @@ function deriveFollowUpFocus(chat, prompt) {
 
   const coverageTokens = new Set();
 
+  if (chat.initialUserPrompt) {
+    tokenizeForComparison(chat.initialUserPrompt).forEach((token) => coverageTokens.add(token));
+  }
+
   for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
     const message = chat.messages[index];
     if (!message || message.role !== 'assistant') {
@@ -1645,10 +1688,11 @@ function tokenizeForComparison(text) {
     .slice(0, 20);
 }
 
-function buildQueriesFromFocusTerms(terms, fallbackPrompt) {
+function buildQueriesFromFocusTerms(terms, fallbackPrompt, initialGoal) {
   const unique = Array.from(new Set((terms || []).map((term) => term.trim()).filter(Boolean)));
   if (!unique.length) {
-    return fallbackPrompt ? [fallbackPrompt] : [];
+    const base = fallbackPrompt || initialGoal;
+    return base ? [base] : [];
   }
 
   const queries = [];
@@ -1661,6 +1705,10 @@ function buildQueriesFromFocusTerms(terms, fallbackPrompt) {
 
   if (fallbackPrompt) {
     queries.push(fallbackPrompt);
+  }
+
+  if (initialGoal) {
+    queries.push(initialGoal);
   }
 
   return queries.slice(0, 4);
