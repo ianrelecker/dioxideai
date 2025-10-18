@@ -6,14 +6,19 @@ const { randomUUID } = require('crypto');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { marked } = require('marked');
+const { autoUpdater } = require('electron-updater');
+
+const isDevelopment = !app.isPackaged;
 
 // Enable hot-reload during development; ignore failures in production builds.
-try {
-  require('electron-reload')(__dirname, {
-    electron: path.join(__dirname, 'node_modules', '.bin', 'electron'),
-  });
-} catch (err) {
-  console.warn('electron-reload not available:', err.message);
+if (isDevelopment) {
+  try {
+    require('electron-reload')(__dirname, {
+      electron: path.join(__dirname, 'node_modules', '.bin', 'electron'),
+    });
+  } catch (err) {
+    console.warn('electron-reload not available:', err.message);
+  }
 }
 
 const DEFAULT_SETTINGS = {
@@ -35,6 +40,8 @@ let settingsLoaded = false;
 let settingsPath;
 
 const activeRequests = new Map();
+let mainWindow = null;
+let autoUpdateInitialized = false;
 
 app.whenReady().then(async () => {
   await Promise.all([ensureSettingsLoaded(), ensureChatsLoaded()]);
@@ -42,7 +49,7 @@ app.whenReady().then(async () => {
 });
 
 function createWindow() {
-  const win = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1080,
     height: 720,
     minWidth: 900,
@@ -54,8 +61,13 @@ function createWindow() {
     },
   });
 
-  win.loadFile('index.html');
-  win.webContents.openDevTools();
+  mainWindow.loadFile('index.html');
+
+  if (isDevelopment) {
+    mainWindow.webContents.openDevTools();
+  }
+
+  initializeAutoUpdates();
 }
 
 app.on('window-all-closed', () => {
@@ -67,6 +79,22 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
+  }
+});
+
+ipcMain.handle('check-for-updates', async () => {
+  if (!app.isPackaged) {
+    return { skipped: true };
+  }
+
+  initializeAutoUpdates();
+
+  try {
+    const result = await autoUpdater.checkForUpdates();
+    return { updateInfo: result?.updateInfo || null };
+  } catch (err) {
+    console.error('Manual update check failed:', err);
+    return { error: err.message || 'Unable to check for updates.' };
   }
 });
 
@@ -193,6 +221,15 @@ ipcMain.handle('export-chat', async (_event, { chatId, format }) => {
   return { error: 'Unsupported format' };
 });
 
+ipcMain.handle('delete-all-chats', async () => {
+  await ensureChatsLoaded();
+
+  chatsCache = [];
+  await persistChats();
+
+  return { success: true };
+});
+
 ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, userLinks = [] }) => {
   if (!prompt?.trim()) {
     return { chatId, error: 'Prompt is empty' };
@@ -223,7 +260,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
 
   const effectiveSettings = getEffectiveSettings();
   const searchPrompt = buildSearchPrompt(chat, prompt);
-  const searchPlan = createSearchPlan(searchPrompt, effectiveSettings);
+  const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt);
   let contextResult = { text: '', entries: [], queries: [], retrievedAt: null };
   let contextMessage = '';
   let contextQueries = [];
@@ -449,6 +486,82 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     userLinks: userLinksForContext,
   };
 });
+
+function initializeAutoUpdates() {
+  if (autoUpdateInitialized || !app.isPackaged) {
+    return;
+  }
+
+  autoUpdateInitialized = true;
+  autoUpdater.autoDownload = true;
+
+  autoUpdater.on('update-available', (info) => {
+    sendAutoUpdateStatus('update-available', {
+      version: info?.version,
+      releaseDate: info?.releaseDate,
+    });
+  });
+
+  autoUpdater.on('download-progress', (progress) => {
+    sendAutoUpdateProgress({
+      percent: progress?.percent,
+      transferred: progress?.transferred,
+      total: progress?.total,
+      bytesPerSecond: progress?.bytesPerSecond,
+    });
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    sendAutoUpdateStatus('update-downloaded');
+
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      autoUpdater.quitAndInstall();
+      return;
+    }
+
+    dialog
+      .showMessageBox(mainWindow, {
+        type: 'info',
+        buttons: ['Install and Restart', 'Later'],
+        defaultId: 0,
+        cancelId: 1,
+        title: 'Update Ready',
+        message: 'A new version has been downloaded.',
+        detail: 'Restart now to apply the latest update?',
+      })
+      .then(({ response }) => {
+        if (response === 0) {
+          autoUpdater.quitAndInstall();
+        }
+      })
+      .catch((err) => {
+        console.error('Failed to show update dialog:', err);
+      });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('Auto update error:', err);
+    sendAutoUpdateStatus('error', { message: err?.message || 'Unknown error' });
+  });
+
+  autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+    console.error('Auto update check failed:', err);
+  });
+}
+
+function sendAutoUpdateStatus(status, payload = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send('auto-update-status', { status, ...payload });
+}
+
+function sendAutoUpdateProgress(progress = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send('auto-update-progress', progress);
+}
 
 function createChatRecord(model = null) {
   const now = new Date().toISOString();
@@ -907,7 +1020,7 @@ function extractPageSummary(html, options = {}) {
   return summaryParts.join(' ').trim();
 }
 
-function createSearchPlan(prompt, prefs = getDefaultSettings()) {
+function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '') {
   const trimmed = prompt.trim();
   if (!trimmed) {
     return {
@@ -920,14 +1033,33 @@ function createSearchPlan(prompt, prefs = getDefaultSettings()) {
   }
 
   const autoEnabled = prefs?.autoWebSearch !== false;
-  const genericFresh = isGenericFreshInfoPrompt(trimmed);
-  const baseShouldSearch = shouldUseWebSearch(trimmed);
-  const queries = generateSearchQueries(trimmed);
+  const rawUserPrompt = typeof userPrompt === 'string' ? userPrompt.trim() : '';
+  const directiveInfo = extractDirectiveQuery(rawUserPrompt);
+  const directiveQuery = directiveInfo.query;
+  const directiveDetected = directiveInfo.detected;
+
+  if (directiveDetected && !directiveQuery) {
+    return {
+      shouldSearch: false,
+      queries: [],
+      genericFresh: false,
+      message: 'Targeted request detected with no searchable title—using provided references only.',
+      disabled: false,
+    };
+  }
+
+  const basePrompt = directiveQuery || trimmed;
+
+  const genericFresh = !directiveDetected && isGenericFreshInfoPrompt(basePrompt);
+  const baseShouldSearch = shouldUseWebSearch(basePrompt);
+
+  let queries = directiveQuery ? [directiveQuery] : generateSearchQueries(basePrompt);
+  queries = Array.from(new Set(queries.filter(Boolean)));
 
   if (!autoEnabled) {
     return {
       shouldSearch: false,
-      queries: queries.length ? queries : [trimmed],
+      queries: queries.length ? queries : [basePrompt],
       genericFresh,
       message: 'Web search is disabled in settings.',
       disabled: true,
@@ -936,16 +1068,20 @@ function createSearchPlan(prompt, prefs = getDefaultSettings()) {
 
   const hasQueries = queries.length > 0;
   const shouldSearch = autoEnabled ? hasQueries || baseShouldSearch || genericFresh : baseShouldSearch || genericFresh;
-
-  return {
-    shouldSearch,
-    queries: queries.length ? queries : [trimmed],
-    genericFresh,
-    message: genericFresh
+  const directiveSummary = directiveQuery ? truncateForSearch(directiveQuery, 120) : '';
+  const message = directiveQuery
+    ? `Targeted request detected – gathering information for "${directiveSummary}".`
+    : genericFresh
       ? 'Broad request detected – gathering current headlines.'
       : autoEnabled
         ? 'Automatic web search is enabled – gathering supporting snippets.'
-        : 'Collecting supporting information from the web.',
+        : 'Collecting supporting information from the web.';
+
+  return {
+    shouldSearch,
+    queries: queries.length ? queries : [basePrompt],
+    genericFresh,
+    message,
     disabled: false,
   };
 }
@@ -974,6 +1110,105 @@ function isGenericFreshInfoPrompt(prompt) {
   }
 
   return false;
+}
+
+function extractDirectiveQuery(prompt) {
+  const result = { detected: false, query: '' };
+
+  if (!prompt || typeof prompt !== 'string') {
+    return result;
+  }
+
+  const directivePattern =
+    /(fetch|get)\s+(?:me\s+)?(?:this|that|the)?\s*(?:page|information|article|details|story|resource|data)(?:\s+(?:about|on|regarding)\s+)?(.*)/i;
+  const triggerPattern =
+    /(fetch|get)\s+(?:me\s+)?(?:this|that|the)?\s*(?:page|information|article|details|story|resource|data)/i;
+
+  if (!triggerPattern.test(prompt.toLowerCase())) {
+    return result;
+  }
+
+  result.detected = true;
+
+  const lines = prompt.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!triggerPattern.test(line.toLowerCase())) {
+      continue;
+    }
+
+    let candidate = '';
+
+    const colonIndex = line.lastIndexOf(':');
+    if (colonIndex !== -1 && colonIndex < line.length - 1) {
+      candidate = line.slice(colonIndex + 1).trim();
+    }
+
+    if (!candidate) {
+      const match = line.match(directivePattern);
+      if (match && match[2]) {
+        candidate = match[2].trim();
+      }
+    }
+
+    if (!candidate) {
+      const quoted = line.match(/["“'‘](.+?)["”'’]$/);
+      if (quoted && quoted[1]) {
+        candidate = quoted[1].trim();
+      }
+    }
+
+    if (!candidate && i + 1 < lines.length) {
+      candidate = lines[i + 1];
+    }
+
+    if (!candidate && i > 0) {
+      candidate = lines[i - 1];
+    }
+
+    const cleaned = cleanDirectiveQuery(candidate);
+    if (cleaned) {
+      return { detected: true, query: cleaned };
+    }
+  }
+
+  const fallbackMatch = prompt.match(directivePattern);
+  if (fallbackMatch && fallbackMatch[2]) {
+    const cleaned = cleanDirectiveQuery(fallbackMatch[2]);
+    if (cleaned) {
+      return { detected: true, query: cleaned };
+    }
+  }
+
+  return result;
+}
+
+function cleanDirectiveQuery(raw) {
+  if (!raw || typeof raw !== 'string') {
+    return '';
+  }
+
+  let value = raw.trim();
+  if (!value) {
+    return '';
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    return '';
+  }
+
+  value = value
+    .replace(/^(?:fetch|get)\s+(?:me\s+)?(?:this|that|the)?\s*(?:page|information|article|details|story|resource|data)/i, '')
+    .replace(/^[:\-–—\s]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!value || value.length < 3) {
+    return '';
+  }
+
+  return value;
 }
 
 function generateSearchQueries(prompt) {

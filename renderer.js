@@ -22,6 +22,7 @@ let searchResultLimitInput;
 let searchResultValue;
 let themeSelect;
 let sidebarCollapseToggle;
+let deleteAllChatsButton;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
@@ -89,6 +90,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   searchResultValue = document.getElementById('searchResultValue');
   themeSelect = document.getElementById('themeSelect');
   sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
+  deleteAllChatsButton = document.getElementById('deleteAllChatsBtn');
 
 
   try {
@@ -183,6 +185,8 @@ function registerUIListeners() {
   searchResultLimitInput?.addEventListener('change', () =>
     applySettingsUpdate({ searchResultLimit: Number(searchResultLimitInput.value) })
   );
+
+  deleteAllChatsButton?.addEventListener('click', handleDeleteAllChats);
 
 
 
@@ -835,6 +839,9 @@ function updateInteractivity() {
   if (!state.settingsPanelOpen) {
     settingsButton.disabled = state.isStreaming;
   }
+  if (deleteAllChatsButton) {
+    deleteAllChatsButton.disabled = state.isStreaming;
+  }
   if (state.isStreaming) {
     chatListNav.classList.add('disabled');
   } else {
@@ -845,6 +852,47 @@ function updateInteractivity() {
     if (sidebarToggleBtn) {
       sidebarToggleBtn.disabled = false;
     }
+  }
+}
+
+async function handleDeleteAllChats() {
+  if (!deleteAllChatsButton || state.isStreaming) {
+    return;
+  }
+
+  const confirmed = window.confirm(
+    'Delete all chats permanently? This cannot be undone.'
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const originalText = deleteAllChatsButton.textContent;
+  deleteAllChatsButton.disabled = true;
+  deleteAllChatsButton.textContent = 'Deleting…';
+
+  try {
+    const result = await window.api.deleteAllChats();
+    if (result?.error) {
+      throw new Error(result.error);
+    }
+
+    state.isStreaming = false;
+    state.pendingAssistantByChat.clear();
+    state.chats = [];
+    state.currentChat = null;
+    state.currentChatId = null;
+    chatArea.innerHTML = '';
+    chatListNav.innerHTML = '';
+
+    await handleNewChat();
+    updateInteractivity();
+  } catch (err) {
+    console.error('Failed to delete chats:', err);
+    window.alert(err?.message || 'Unable to delete chats right now.');
+  } finally {
+    deleteAllChatsButton.textContent = originalText;
+    deleteAllChatsButton.disabled = false;
   }
 }
 

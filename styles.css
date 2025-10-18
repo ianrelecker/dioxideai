@@ -230,7 +230,7 @@ body.sidebar-collapsed #chatPane {
 
 .message {
   max-width: min(70%, 720px);
-  padding: 0.8rem 1rem;
+  padding: 1rem 1.15rem;
   border-radius: 14px;
   line-height: 1.35;
   display: flex;
@@ -257,6 +257,10 @@ body.sidebar-collapsed #chatPane {
   word-break: break-word;
   line-height: 1.28;
   overflow-wrap: anywhere;
+}
+
+.message.bot .message-text {
+  padding-top: 0.15rem;
 }
 
 .message-text p {
@@ -295,6 +299,25 @@ body.sidebar-collapsed #chatPane {
   border-radius: 8px;
   background: rgba(15, 16, 19, 0.85);
   border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.message-text table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.35rem 0;
+  font-size: 0.95rem;
+}
+
+.message-text th,
+.message-text td {
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  padding: 0.45rem 0.5rem;
+  text-align: left;
+}
+
+.message-text th {
+  background: rgba(255, 255, 255, 0.08);
+  font-weight: 600;
 }
 
 .message-text pre code {
@@ -626,6 +649,33 @@ body.settings-open {
   color: inherit;
 }
 
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.settings-actions button {
+  padding: 0.5rem 0.9rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: #f5f5f7;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s ease, border 0.2s ease;
+}
+
+.settings-actions button.danger {
+  border-color: rgba(255, 99, 132, 0.5);
+  color: #ffc7d1;
+  background: rgba(255, 99, 132, 0.15);
+}
+
+.settings-actions button.danger:hover {
+  background: rgba(255, 99, 132, 0.25);
+  border-color: rgba(255, 99, 132, 0.65);
+}
+
 
 
 
@@ -730,6 +780,15 @@ body.theme-light .message-text code {
   color: #1c1c1e;
 }
 
+body.theme-light .message-text th,
+body.theme-light .message-text td {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+}
+
+body.theme-light .message-text th {
+  background: rgba(0, 0, 0, 0.06);
+}
+
 body.theme-light .message-text a {
   color: #2f63e2;
 }
@@ -811,6 +870,23 @@ body.theme-light .setting-select select {
   background: rgba(255, 255, 255, 0.95);
   border: 1px solid rgba(0, 0, 0, 0.12);
   color: #1c1c1e;
+}
+
+body.theme-light .settings-actions button {
+  border-color: rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.05);
+  color: #1c1c1e;
+}
+
+body.theme-light .settings-actions button.danger {
+  background: rgba(255, 99, 132, 0.18);
+  border-color: rgba(255, 99, 132, 0.35);
+  color: #a82037;
+}
+
+body.theme-light .settings-actions button.danger:hover {
+  background: rgba(255, 99, 132, 0.28);
+  border-color: rgba(255, 99, 132, 0.5);
 }
 
 body.theme-cream {
@@ -898,6 +974,15 @@ body.theme-cream .message-text code {
   color: #7d4314;
 }
 
+body.theme-cream .message-text th,
+body.theme-cream .message-text td {
+  border: 1px solid rgba(120, 92, 58, 0.28);
+}
+
+body.theme-cream .message-text th {
+  background: rgba(206, 150, 84, 0.18);
+}
+
 body.theme-cream .message-text a {
   color: #c0661a;
 }
@@ -978,6 +1063,23 @@ body.theme-cream .setting-select select {
   background: rgba(255, 255, 255, 0.96);
   border: 1px solid rgba(120, 92, 58, 0.25);
   color: #2b2316;
+}
+
+body.theme-cream .settings-actions button {
+  border-color: rgba(120, 92, 58, 0.25);
+  background: rgba(120, 92, 58, 0.08);
+  color: #2b2316;
+}
+
+body.theme-cream .settings-actions button.danger {
+  background: rgba(206, 150, 84, 0.2);
+  border-color: rgba(206, 150, 84, 0.35);
+  color: #7d4314;
+}
+
+body.theme-cream .settings-actions button.danger:hover {
+  background: rgba(206, 150, 84, 0.32);
+  border-color: rgba(206, 150, 84, 0.45);
 }
 
 

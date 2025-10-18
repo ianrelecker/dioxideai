@@ -12,6 +12,7 @@ Desktop chat interface for running local large language models through [Ollama](
  - Quick header controls (New Chat, web-search toggle, hide chats) plus a configurable theme picker.
  - Streaming controls with a Stop button and rich Markdown rendering (code blocks, hyperlinks).
  - Drop links directly into prompts; they’re added to the context alongside web results.
+ - Built-in macOS packaging with auto-updates served from GitHub Releases.
  - Local-first storage of every conversation in `app.getPath('userData')`.
 
 ## Requirements
@@ -58,23 +59,31 @@ Click the gear icon in the chat header to open the modal preferences panel:
 - **Automatic web search** – disable to keep the assistant strictly offline.
 - **Open thoughts by default** – auto-expand the reasoning/context drawer for each reply.
 - **Max search results** – slider (1–12) controlling how many snippets are collected from DuckDuckGo per prompt.
-- **Theme** – choose Light, Dark, or follow the system theme (updates instantly).
+- **Theme** – choose Light, Dark, Cream, or follow the system theme (updates instantly).
 - **Hide chat history sidebar** – collapse the previous chats panel by default.
+- **Delete all chats** – wipe every saved conversation (creates a fresh empty chat immediately).
 - **Export conversation** – save the current chat as Markdown or PDF.
 
 Preferences persist in `~/Library/Application Support/ollama-electron-gui/ollama-electron-settings.json`.
 
-## Packaging (macOS)
+## Packaging & Updates (macOS)
 
-To create a distributable `.app`, you can add [Electron Forge](https://www.electronforge.io/) or [Electron Builder](https://www.electron.build/). Example with Forge:
+This project ships with an [electron-builder](https://www.electron.build/) setup that produces a drag-to-Install DMG and wires in auto-updates via `electron-updater`.
 
-```bash
-npm install --save-dev @electron-forge/cli
-npx electron-forge import
-npm run make
-```
+1. Set the `build.publish` block in `package.json` to point at your GitHub repo (or another update server). When publishing to GitHub Releases, export a `GH_TOKEN` with repo scope before running the build.
+2. Ensure you have a signing identity installed (`Developer ID Application: …`). Electron Builder will auto-discover it, or you can set `CSC_IDENTITY_AUTO_DISCOVERY=false` and provide `CSC_NAME`.
+3. Build the bundle:
 
-Forge outputs a signed (development) `.app` under `out/`. For production distribution, follow Apple’s notarization guidelines.
+   ```bash
+   npm run dist
+   ```
+
+   Outputs land inside the `dist/` directory: signed `.dmg` and `.zip` artifacts plus the `.app`.
+
+4. Notarize the `Ollama Electron GUI.app` and DMG (e.g., via `xcrun notarytool submit --keychain-profile …`). After notarization, staple the ticket: `xcrun stapler staple dist/Ollama\ Electron\ GUI.dmg`.
+5. Publish the generated `latest-mac.yml` and artifacts (DMG/ZIP) to your release endpoint. Auto-updates run only in packaged builds and will download/apply new releases automatically, prompting the user to restart once ready.
+
+If you need a custom DMG background or icon, place assets under `build/` and update the `build` section of `package.json`.
 
 ## Configuration
 
@@ -97,12 +106,12 @@ Delete those files to clear the history and reset settings.
 - **No models listed**: Confirm Ollama is running and models are installed (`ollama list`).
 - **Slow responses**: Larger models take longer to load; the first query may be slow while the model warms up.
 - **Blocked network**: DuckDuckGo HTML endpoint must be reachable; firewalls or VPNs can interfere with scraping.
-- **Packaging issues**: When packaging with Forge/Builder, ensure native modules (`cheerio`) are handled automatically; rebuilding is not required because dependencies are pure JS.
+- **Packaging issues**: `npm run dist` uses electron-builder; ensure the signing identity is available and that `publish` is configured before shipping auto-updates.
 
 ## Future Enhancements
 
  - Local vector store to ground models on personal notes or documents.
-- Theme picker (light/dark/system) and compact density modes.
+ - Compact density modes and typography options.
  - Per-model defaults, temperature controls, and advanced Ollama parameters.
 
 ## Project Structure

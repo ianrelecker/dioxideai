@@ -10,6 +10,8 @@ const exposeAPI = {
   listChats: () => ipcRenderer.invoke('list-chats'),
   createChat: (model) => ipcRenderer.invoke('create-chat', { model }),
   getChat: (chatId) => ipcRenderer.invoke('get-chat', { chatId }),
+  deleteAllChats: () => ipcRenderer.invoke('delete-all-chats'),
+  checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   onStream: (callback) => {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('ollama-stream', listener);
@@ -21,6 +23,16 @@ const exposeAPI = {
     return () => ipcRenderer.removeListener('ollama-thinking', listener);
   },
   renderMarkdown: (text) => ipcRenderer.invoke('render-markdown', text),
+  onAutoUpdateStatus: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('auto-update-status', listener);
+    return () => ipcRenderer.removeListener('auto-update-status', listener);
+  },
+  onAutoUpdateProgress: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('auto-update-progress', listener);
+    return () => ipcRenderer.removeListener('auto-update-progress', listener);
+  },
 };
 
 contextBridge.exposeInMainWorld('api', exposeAPI);
