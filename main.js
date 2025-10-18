@@ -193,7 +193,7 @@ ipcMain.handle('export-chat', async (_event, { chatId, format }) => {
   return { error: 'Unsupported format' };
 });
 
-ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId }) => {
+ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, userLinks = [] }) => {
   if (!prompt?.trim()) {
     return { chatId, error: 'Prompt is empty' };
   }
@@ -205,6 +205,8 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId })
   if (requestId) {
     activeRequests.set(requestId, controller);
   }
+
+  const normalizedUserLinks = Array.from(new Set((userLinks || []).map((link) => String(link).trim()).filter(Boolean)));
 
   let chat = chatId ? chatsCache.find((item) => item.id === chatId) : null;
   if (!chat) {
@@ -220,8 +222,12 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId })
   const historyMessages = chat.messages.map(({ role, content }) => ({ role, content }));
 
   const effectiveSettings = getEffectiveSettings();
-  const searchPlan = createSearchPlan(prompt, effectiveSettings);
+  const searchPrompt = buildSearchPrompt(chat, prompt);
+  const searchPlan = createSearchPlan(searchPrompt, effectiveSettings);
   let contextResult = { text: '', entries: [], queries: [], retrievedAt: null };
+  let contextMessage = '';
+  let contextQueries = [];
+  let userLinksForContext = [...normalizedUserLinks];
 
   if (searchPlan.shouldSearch && searchPlan.queries.length) {
     event.sender.send('ollama-thinking', {
@@ -235,25 +241,55 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId })
       limit: effectiveSettings.searchResultLimit,
     });
 
-    event.sender.send('ollama-thinking', {
-      chatId,
-      stage: 'context',
-      message: contextResult.entries.length ? 'Context gathered from the web.' : 'No relevant web results found.',
-      context: contextResult.text,
-      queries: contextResult.queries,
-      retrievedAt: contextResult.retrievedAt,
-    });
+    if (contextResult.entries.length) {
+      contextMessage = normalizedUserLinks.length
+        ? 'Context gathered from the web along with user-provided links.'
+        : 'Context gathered from the web.';
+    } else if (normalizedUserLinks.length) {
+      contextMessage = 'No relevant web results found. Using user-provided links.';
+    } else {
+      contextMessage = 'No relevant web results found.';
+    }
+    contextQueries = contextResult.queries;
+
   } else {
-    event.sender.send('ollama-thinking', {
-      chatId,
-      stage: 'context',
-      message: searchPlan.disabled
+    contextMessage = normalizedUserLinks.length
+      ? 'Using user-provided links.'
+      : searchPlan.disabled
         ? searchPlan.message || 'Web search disabled in settings.'
-        : 'Responding with model knowledge (no web search).',
-      context: '',
-      queries: searchPlan.disabled ? searchPlan.queries : [],
-    });
+        : 'Responding with model knowledge (no web search).';
+    contextQueries = [];
+    userLinksForContext = normalizedUserLinks;
   }
+
+  const contextSections = [];
+  if (contextResult.text && contextResult.text.trim()) {
+    contextSections.push(contextResult.text.trim());
+  }
+  if (userLinksForContext.length) {
+    const linksBlock = ['User-provided links:', ...userLinksForContext.map((link) => `• ${link}`)].join('\n');
+    contextSections.push(linksBlock);
+  }
+
+  const finalContext = contextSections.join('\n\n').trim();
+  contextResult.text = finalContext;
+  contextResult.userLinks = userLinksForContext;
+
+  if (!contextMessage) {
+    contextMessage = userLinksForContext.length
+      ? 'Using user-provided links.'
+      : 'Responding with model knowledge (no web search).';
+  }
+
+  event.sender.send('ollama-thinking', {
+    chatId,
+    stage: 'context',
+    message: contextMessage,
+    context: finalContext,
+    queries: contextQueries,
+    userLinks: userLinksForContext,
+    retrievedAt: contextResult.retrievedAt,
+  });
 
   const messagesForModel = [
     { role: 'system', content: buildBaseSystemPrompt() },
@@ -367,12 +403,13 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId })
   }
 
   const trimmedAnswer = assistantContent.trim();
-  const contextQueries =
-    Array.isArray(contextResult.queries) && contextResult.queries.length
+  if (!contextQueries.length) {
+    contextQueries = Array.isArray(contextResult.queries) && contextResult.queries.length
       ? contextResult.queries
       : searchPlan.disabled
         ? searchPlan.queries
         : [];
+  }
   const contextRetrievedAt = contextResult.retrievedAt || null;
 
   chat.messages.push(
@@ -409,6 +446,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId })
     context: contextResult.text,
     contextQueries,
     contextRetrievedAt,
+    userLinks: userLinksForContext,
   };
 });
 
@@ -647,7 +685,7 @@ function clampSearchLimit(value) {
 }
 
 function normalizeTheme(theme) {
-  const allowed = ['system', 'light', 'dark'];
+  const allowed = ['system', 'light', 'dark', 'cream'];
   if (allowed.includes(theme)) {
     return theme;
   }
@@ -754,9 +792,14 @@ async function performWebSearch(queries, options = {}) {
       return { text: '', entries: [], queries: uniqueQueries, retrievedAt };
     }
 
+    const enrichedEntries = await enrichEntriesWithPageContent(entries, {
+      maxPages: Math.min(entries.length, Math.max(1, Math.min(4, maxEntries))),
+      maxCharsPerEntry: 1400,
+    });
+
     return {
-      text: formatSearchEntries(entries, retrievedAt, uniqueQueries),
-      entries,
+      text: formatSearchEntries(enrichedEntries, retrievedAt, uniqueQueries),
+      entries: enrichedEntries,
       queries: uniqueQueries,
       retrievedAt,
     };
@@ -764,6 +807,104 @@ async function performWebSearch(queries, options = {}) {
     console.error('Web search failed:', err);
     return { text: '', entries: [], queries: uniqueQueries, retrievedAt };
   }
+}
+
+async function enrichEntriesWithPageContent(entries, options = {}) {
+  const result = entries.map((entry) => ({ ...entry }));
+  const maxPages = Math.max(
+    1,
+    Math.min(options?.maxPages ?? Math.min(3, result.length), result.length)
+  );
+  const maxChars = Math.max(400, options?.maxCharsPerEntry ?? 1400);
+  let fetchedCount = 0;
+
+  /* eslint-disable no-await-in-loop */
+  for (let index = 0; index < result.length; index += 1) {
+    if (fetchedCount >= maxPages) {
+      break;
+    }
+
+    const entry = result[index];
+    if (!entry?.url) {
+      continue;
+    }
+
+    try {
+      const res = await fetch(entry.url, {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15',
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        redirect: 'follow',
+      });
+
+      if (!res.ok || !res.headers.get('content-type')?.includes('text/html')) {
+        continue;
+      }
+
+      const html = await res.text();
+      const extracted = extractPageSummary(html, { maxChars });
+      if (extracted) {
+        entry.summary = extracted;
+        fetchedCount += 1;
+      }
+    } catch (err) {
+      console.error(`Failed to fetch page content for ${entry.url}:`, err.message || err);
+    }
+  }
+  /* eslint-enable no-await-in-loop */
+
+  return result;
+}
+
+function extractPageSummary(html, options = {}) {
+  if (!html) {
+    return '';
+  }
+
+  const maxChars = Math.max(400, options?.maxChars ?? 1400);
+  const $ = cheerio.load(html);
+
+  $('script, style, noscript, svg, iframe, footer, header, nav, form, picture, figure, video, audio').remove();
+
+  const root =
+    $('main').length > 0
+      ? $('main')
+      : $('article').length > 0
+        ? $('article')
+        : $('body');
+
+  const paragraphs = [];
+  root.find('p').each((_idx, el) => {
+    const text = $(el).text().replace(/\s+/g, ' ').trim();
+    if (text.length >= 60) {
+      paragraphs.push(text);
+    }
+  });
+
+  if (!paragraphs.length) {
+    return '';
+  }
+
+  const fullText = paragraphs.join(' ');
+  const sentences = fullText.split(/(?<=[.!?])\s+/).filter(Boolean);
+  const summaryParts = [];
+  let totalChars = 0;
+
+  for (const sentence of sentences) {
+    const trimmed = sentence.trim();
+    if (!trimmed) {
+      continue;
+    }
+    summaryParts.push(trimmed);
+    totalChars += trimmed.length + 1;
+    if (summaryParts.length >= 8 || totalChars >= maxChars) {
+      break;
+    }
+  }
+
+  return summaryParts.join(' ').trim();
 }
 
 function createSearchPlan(prompt, prefs = getDefaultSettings()) {
@@ -887,7 +1028,9 @@ function extractNewsTopic(prompt) {
 
 function buildBaseSystemPrompt() {
   return [
-    'You are a precise assistant that values factual accuracy.',
+    'You are a precise assistant that values factual accuracy and depth.',
+    'Use the conversation history and supplied context to craft comprehensive, user-facing answers.',
+    'Never assume the user can open a website—surface the key facts directly in your reply.',
     'Cite the source domain in parentheses when you use supplied context.',
     'If the provided context does not answer the question, say you do not know.',
   ].join(' ');
@@ -898,6 +1041,9 @@ function buildContextInstruction({ context, retrievedAt, genericFresh }) {
     'Incorporate the verified facts from the context below when answering.',
     'Never invent information that is not supported by the context or prior conversation.',
     'If the web context directly answers the question, use it; otherwise fall back to the prior conversation.',
+    'Give precedence to user-provided links when they are relevant to the question.',
+    'Provide a thorough, well-structured answer that explains key details and the implications of those facts.',
+    'Draw connections between sources when helpful and end with clear takeaways or next steps when appropriate.',
   ];
 
   if (genericFresh) {
@@ -944,7 +1090,9 @@ function formatSearchEntries(entries, retrievedAt, queries) {
   const body = entries
     .map((entry) => {
       const lines = [`• ${entry.title}`];
-      if (entry.snippet) {
+      if (entry.summary) {
+        lines.push(entry.summary);
+      } else if (entry.snippet) {
         lines.push(entry.snippet);
       }
       if (entry.url) {
@@ -989,4 +1137,51 @@ function truncateSnippet(snippet) {
     return snippet;
   }
   return `${snippet.slice(0, 317)}…`;
+}
+
+
+function buildSearchPrompt(chat, currentPrompt) {
+  const contextParts = [];
+
+  const userMessages = (chat.messages || []).filter((msg) => msg.role === 'user');
+  if (!userMessages.length) {
+    return `New question: ${currentPrompt}`;
+  }
+
+  const firstUser = userMessages[0];
+  contextParts.push(`Initial question: ${firstUser.content}`);
+
+  const lastAssistant = [...(chat.messages || [])].reverse().find((msg) => msg.role === 'assistant');
+  if (lastAssistant?.meta?.context) {
+    const contextExcerpt = truncateForSearch(lastAssistant.meta.context, 1200);
+    if (contextExcerpt) {
+      contextParts.push(`Previously gathered context:\n${contextExcerpt}`);
+    }
+  }
+
+  if (lastAssistant) {
+    contextParts.push(`Most recent answer: ${lastAssistant.content}`);
+  }
+
+  const previousUser = userMessages[userMessages.length - 1];
+  if (previousUser && previousUser !== firstUser) {
+    contextParts.push(`Previous follow-up question: ${previousUser.content}`);
+  }
+
+  contextParts.push(`Current follow-up question: ${currentPrompt}`);
+
+  return contextParts.join('\n\n');
+}
+
+function truncateForSearch(text, maxChars = 1200) {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxChars - 1)}…`;
 }

@@ -11,6 +11,7 @@ Desktop chat interface for running local large language models through [Ollama](
  - Smart search planning that expands broad prompts (e.g., “latest news”) into focused queries for richer context.
  - Quick header controls (New Chat, web-search toggle, hide chats) plus a configurable theme picker.
  - Streaming controls with a Stop button and rich Markdown rendering (code blocks, hyperlinks).
+ - Drop links directly into prompts; they’re added to the context alongside web results.
  - Local-first storage of every conversation in `app.getPath('userData')`.
 
 ## Requirements
@@ -45,7 +46,7 @@ This launches the Electron app with auto-reload enabled. Edit the files under `o
 3. Select one of the locally installed Ollama models (models are discovered via `GET /api/tags`).
 4. Type a prompt and press **Send** or hit **Enter** (use **Shift+Enter** for a newline).
 5. The main process decides whether to augment the prompt with live context. If it does, it plans a set of DuckDuckGo queries (broad requests like “latest news” are expanded automatically), scrapes the top snippets with `cheerio`, and streams a reply from Ollama’s `/api/chat`.
-6. Responses arrive in real time; use the **Stop** button beside a live response to cancel long generations, and open the “Thoughts” disclosure to inspect retrieved context.
+6. Responses arrive in real time; include any http(s) links in your prompt and they’ll be added to the context automatically. Use the **Stop** button beside a live response to cancel long generations, and open the “Thoughts” disclosure to inspect retrieved context.
 7. Use the header pills to toggle **Web Search** (defaults to on) and **Hide Chats**. Open the gear icon to adjust additional preferences.
 
 Chats are saved automatically and reloaded when you reopen the application.

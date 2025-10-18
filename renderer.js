@@ -1,3 +1,5 @@
+const urlRegex = /https?:\/\/[^\s]+/gi;
+
 let modelSelect;
 let refreshModelsButton;
 let chatTitleEl;
@@ -44,6 +46,16 @@ const state = {
 const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
 const createRequestId = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+function extractLinks(input) {
+  if (!input) {
+    return [];
+  }
+
+  const matches = input.match(urlRegex) || [];
+  const unique = new Set(matches.map((link) => link.trim()));
+  return Array.from(unique);
+}
 
 function stopGeneration(requestId) {
   if (!requestId) {
@@ -297,8 +309,8 @@ function registerStreamHandlers() {
       entry.clearActions();
       entry.setContent(data.error);
       entry.setSummary('Error');
-      entry.openThoughts();
       entry.setThought(data.error);
+      entry.openThoughts();
       state.pendingAssistantByChat.delete(data.chatId);
       state.isStreaming = false;
       state.activeRequestId = null;
@@ -311,6 +323,7 @@ function registerStreamHandlers() {
       entry.clearActions();
       entry.setContent('Generation stopped.');
       entry.setSummary('Notes');
+      entry.openThoughts();
       entry.setThought('Generation canceled by user.');
       state.pendingAssistantByChat.delete(data.chatId);
       state.isStreaming = false;
@@ -342,7 +355,6 @@ function registerStreamHandlers() {
 
     if (data.stage === 'search-plan' || data.stage === 'search-started') {
       entry.setSummary('Notes');
-      entry.openThoughts();
       entry.setThought(
         formatSearchPlanThought({
           message: data.message || 'Preparing web search queries.',
@@ -438,9 +450,10 @@ async function handlePromptSubmit() {
   updateInteractivity();
 
   const requestId = createRequestId();
+  const userLinks = extractLinks(prompt);
 
   const assistantEntry = appendAssistantMessage('Thinking…', {
-    open: true,
+    open: false,
     thoughts: 'Preparing response…',
     summary: 'Notes',
   });
@@ -474,6 +487,7 @@ async function handlePromptSubmit() {
       model,
       prompt,
       requestId,
+      userLinks,
     });
 
     assistantEntry.clearActions();
@@ -483,6 +497,7 @@ async function handlePromptSubmit() {
     if (result?.aborted) {
       assistantEntry.setContent('Generation stopped.');
       assistantEntry.setSummary('Notes');
+      assistantEntry.openThoughts();
       assistantEntry.setThought('Generation canceled by user.');
       state.pendingAssistantByChat.delete(chatId);
       state.isStreaming = false;
@@ -491,6 +506,7 @@ async function handlePromptSubmit() {
     }
 
     if (result?.error) {
+      assistantEntry.clearActions();
       assistantEntry.setContent(result.error);
       assistantEntry.setSummary('Error');
       assistantEntry.openThoughts();
@@ -524,6 +540,7 @@ async function handlePromptSubmit() {
         context: result.context,
         queries: result.contextQueries,
         retrievedAt: result.contextRetrievedAt,
+        links: result.userLinks,
       },
       model
     );
@@ -776,6 +793,7 @@ function recordAssistantMessage(content, contextData, model) {
       contextQueries,
       contextRetrievedAt,
       usedWebSearch: Boolean(contextText),
+      userLinks: contextData?.links || [],
     },
   });
   state.currentChat.model = model;
@@ -870,13 +888,22 @@ function formatContextThought({ message, context, queries, retrievedAt }) {
 
 function formatStoredContext(meta = {}) {
   const hasQueries = Array.isArray(meta.contextQueries) && meta.contextQueries.length > 0;
+  const hasLinks = Array.isArray(meta.userLinks) && meta.userLinks.length > 0;
+  let context = meta.context;
+
+  if ((!context || !context.trim()) && hasLinks) {
+    context = ['User-provided links:', ...meta.userLinks.map((link) => `• ${link}`)].join('\n');
+  }
+
   return formatContextThought({
     message: meta.usedWebSearch
       ? 'Context used when drafting this reply.'
-      : hasQueries
-        ? 'Web search disabled (saved candidate queries).'
-        : 'No additional context used.',
-    context: meta.context,
+      : hasLinks
+        ? 'User-provided links supplied by the user.'
+        : hasQueries
+          ? 'Web search disabled (saved candidate queries).'
+          : 'No additional context used.',
+    context,
     queries: meta.contextQueries,
     retrievedAt: meta.contextRetrievedAt,
   });
@@ -943,10 +970,52 @@ function setMessageContent(element, value) {
 }
 
 function applyRenderedContent(element, rendered) {
-  element.innerHTML = rendered != null ? rendered : '';
+  const content = rendered != null ? String(rendered) : '';
+  const containsHtml = /<\/?[a-z][\s\S]*>/i.test(content.trim());
+
+  if (containsHtml) {
+    element.innerHTML = content;
+    pruneMarkdownWhitespace(element);
+  } else {
+    element.textContent = content;
+  }
+
   element.querySelectorAll('a').forEach((anchor) => {
     anchor.setAttribute('target', '_blank');
     anchor.setAttribute('rel', 'noopener noreferrer');
+  });
+}
+
+function pruneMarkdownWhitespace(root) {
+  if (!root || !root.childNodes) {
+    return;
+  }
+
+  const nodesToRemove = [];
+  root.childNodes.forEach((node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const value = node.nodeValue || '';
+      const parentName = node.parentNode?.nodeName;
+      if ((parentName === 'PRE' || parentName === 'CODE')) {
+        return;
+      }
+      if (!value.trim() && /\n/.test(value)) {
+        nodesToRemove.push(node);
+      }
+    } else if (
+      node.nodeType === Node.ELEMENT_NODE &&
+      node.firstChild &&
+      node.nodeName !== 'PRE' &&
+      node.nodeName !== 'CODE'
+    ) {
+      pruneMarkdownWhitespace(node);
+    }
+  });
+
+  nodesToRemove.forEach((node) => {
+    if (node.parentNode) {
+      node.parentNode.removeChild(node);
+    }
   });
 }
 
@@ -960,15 +1029,19 @@ function updateSidebarState(collapsed) {
 
 function applyTheme(themeSetting) {
   const resolved = resolveTheme(themeSetting);
-  document.body.classList.toggle('theme-light', resolved === 'light');
-  document.body.classList.toggle('theme-dark', resolved === 'dark');
+  const themeClasses = ['theme-light', 'theme-dark', 'theme-cream'];
+  themeClasses.forEach((className) => {
+    const suffix = className.replace('theme-', '');
+    document.body.classList.toggle(className, resolved === suffix);
+  });
 }
 
 function resolveTheme(themeSetting) {
   if (themeSetting === 'system') {
     return prefersDark && prefersDark.matches ? 'dark' : 'light';
   }
-  return themeSetting === 'dark' ? 'dark' : 'light';
+  const allowed = ['light', 'dark', 'cream'];
+  return allowed.includes(themeSetting) ? themeSetting : 'light';
 }
 
 
