@@ -24,7 +24,7 @@ if (isDevelopment) {
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
-  searchResultLimit: 6,
+  searchResultLimit: 10,
   theme: 'system',
   sidebarCollapsed: false,
 };
@@ -42,6 +42,92 @@ let settingsPath;
 const activeRequests = new Map();
 let mainWindow = null;
 let autoUpdateInitialized = false;
+
+const TOKEN_STOP_WORDS = new Set([
+  'what',
+  "what's",
+  'whats',
+  'is',
+  'are',
+  'was',
+  'were',
+  'be',
+  'been',
+  'being',
+  'it',
+  "it's",
+  'its',
+  'that',
+  'this',
+  'those',
+  'these',
+  'they',
+  'them',
+  'their',
+  'theirs',
+  'he',
+  'she',
+  'him',
+  'her',
+  'hers',
+  'we',
+  'us',
+  'our',
+  'ours',
+  'you',
+  'your',
+  'yours',
+  'me',
+  'do',
+  'does',
+  'did',
+  'done',
+  'have',
+  'has',
+  'had',
+  'will',
+  'would',
+  'can',
+  'could',
+  'should',
+  'about',
+  'the',
+  'a',
+  'an',
+  'and',
+  'or',
+  'of',
+  'to',
+  'for',
+  'on',
+  'in',
+  'at',
+  'with',
+  'from',
+  'as',
+  'so',
+  'just',
+  'really',
+  'thing',
+  'things',
+  'stuff',
+  'one',
+  'something',
+  'give',
+  'more',
+  'some',
+  'another',
+  'else',
+  'info',
+  'information',
+  'details',
+  'bit',
+  'tell',
+  'still',
+  'same',
+]);
+
+const REFERENTIAL_FOLLOW_UP_STOP_WORDS = TOKEN_STOP_WORDS;
 
 app.whenReady().then(async () => {
   await Promise.all([ensureSettingsLoaded(), ensureChatsLoaded()]);
@@ -260,7 +346,11 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
 
   const effectiveSettings = getEffectiveSettings();
   const searchPrompt = buildSearchPrompt(chat, prompt);
-  const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt);
+  const focusTerms = deriveFollowUpFocus(chat, prompt);
+  const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt, {
+    hasRecentContext: hasRecentWebContext(chat),
+    focusTerms,
+  });
   let contextResult = { text: '', entries: [], queries: [], retrievedAt: null };
   let contextMessage = '';
   let contextQueries = [];
@@ -1020,9 +1110,12 @@ function extractPageSummary(html, options = {}) {
   return summaryParts.join(' ').trim();
 }
 
-function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '') {
-  const trimmed = prompt.trim();
-  if (!trimmed) {
+function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '', options = {}) {
+  const historyPrompt = typeof prompt === 'string' ? prompt : '';
+  const trimmedHistory = historyPrompt.trim();
+  const trimmedUserPrompt = typeof userPrompt === 'string' ? userPrompt.trim() : '';
+  const analysisPrompt = trimmedUserPrompt || trimmedHistory;
+  if (!analysisPrompt) {
     return {
       shouldSearch: false,
       queries: [],
@@ -1033,10 +1126,13 @@ function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '')
   }
 
   const autoEnabled = prefs?.autoWebSearch !== false;
-  const rawUserPrompt = typeof userPrompt === 'string' ? userPrompt.trim() : '';
-  const directiveInfo = extractDirectiveQuery(rawUserPrompt);
+  const directiveInfo = extractDirectiveQuery(trimmedUserPrompt || trimmedHistory);
   const directiveQuery = directiveInfo.query;
   const directiveDetected = directiveInfo.detected;
+  const hasRecentContext = Boolean(options?.hasRecentContext);
+  const focusTerms = Array.isArray(options?.focusTerms)
+    ? options.focusTerms.filter((value) => typeof value === 'string' && value.trim().length > 0)
+    : [];
 
   if (directiveDetected && !directiveQuery) {
     return {
@@ -1048,12 +1144,34 @@ function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '')
     };
   }
 
-  const basePrompt = directiveQuery || trimmed;
+  if (
+    hasRecentContext &&
+    !directiveDetected &&
+    trimmedUserPrompt &&
+    (isReferentialFollowUp(trimmedUserPrompt) || focusTerms.length === 0)
+  ) {
+    return {
+      shouldSearch: false,
+      queries: [],
+      genericFresh: false,
+      message: 'Clarifying follow-up detected – using existing web context.',
+      disabled: false,
+    };
+  }
+
+  const basePrompt = directiveQuery || analysisPrompt;
 
   const genericFresh = !directiveDetected && isGenericFreshInfoPrompt(basePrompt);
   const baseShouldSearch = shouldUseWebSearch(basePrompt);
 
-  let queries = directiveQuery ? [directiveQuery] : generateSearchQueries(basePrompt);
+  let queries;
+  if (directiveQuery) {
+    queries = [directiveQuery];
+  } else if (focusTerms.length) {
+    queries = buildQueriesFromFocusTerms(focusTerms, trimmedUserPrompt || basePrompt);
+  } else {
+    queries = generateSearchQueries(basePrompt);
+  }
   queries = Array.from(new Set(queries.filter(Boolean)));
 
   if (!autoEnabled) {
@@ -1419,4 +1537,131 @@ function truncateForSearch(text, maxChars = 1200) {
   }
 
   return `${normalized.slice(0, maxChars - 1)}…`;
+}
+
+function hasRecentWebContext(chat) {
+  if (!chat || !Array.isArray(chat.messages)) {
+    return false;
+  }
+
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    const message = chat.messages[index];
+    if (!message || message.role !== 'assistant') {
+      continue;
+    }
+
+    const meta = message.meta || {};
+    if (meta.context && String(meta.context).trim()) {
+      return true;
+    }
+    if (meta.usedWebSearch) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isReferentialFollowUp(prompt) {
+  if (!prompt || typeof prompt !== 'string') {
+    return false;
+  }
+
+  const normalized = prompt
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .trim();
+
+  if (!normalized) {
+    return false;
+  }
+
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (!tokens.length) {
+    return false;
+  }
+
+  const meaningful = tokens.filter((token) => !REFERENTIAL_FOLLOW_UP_STOP_WORDS.has(token));
+
+  if (!meaningful.length) {
+    return true;
+  }
+
+  if (tokens.length <= 4 && meaningful.length === 1 && meaningful[0].length <= 3) {
+    return true;
+  }
+
+  return false;
+}
+
+function deriveFollowUpFocus(chat, prompt) {
+  if (!chat || !Array.isArray(chat.messages) || !prompt) {
+    return [];
+  }
+
+  const normalizedPrompt = prompt.trim();
+  if (!normalizedPrompt) {
+    return [];
+  }
+
+  const promptTokens = tokenizeForComparison(normalizedPrompt);
+  if (!promptTokens.length) {
+    return [];
+  }
+
+  const coverageTokens = new Set();
+
+  for (let index = chat.messages.length - 1; index >= 0; index -= 1) {
+    const message = chat.messages[index];
+    if (!message || message.role !== 'assistant') {
+      continue;
+    }
+
+    const meta = message.meta || {};
+    if (message.content) {
+      tokenizeForComparison(message.content).forEach((token) => coverageTokens.add(token));
+    }
+    if (meta.context) {
+      tokenizeForComparison(meta.context).forEach((token) => coverageTokens.add(token));
+    }
+
+    break;
+  }
+
+  const focus = promptTokens.filter((token) => !coverageTokens.has(token));
+  return Array.from(new Set(focus)).slice(0, 8);
+}
+
+function tokenizeForComparison(text) {
+  if (!text || typeof text !== 'string') {
+    return [];
+  }
+
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((token) => token && token.length > 2 && !TOKEN_STOP_WORDS.has(token))
+    .slice(0, 20);
+}
+
+function buildQueriesFromFocusTerms(terms, fallbackPrompt) {
+  const unique = Array.from(new Set((terms || []).map((term) => term.trim()).filter(Boolean)));
+  if (!unique.length) {
+    return fallbackPrompt ? [fallbackPrompt] : [];
+  }
+
+  const queries = [];
+  if (unique.length === 1) {
+    queries.push(unique[0]);
+  } else {
+    queries.push(unique.join(' '));
+    unique.slice(0, 3).forEach((term) => queries.push(term));
+  }
+
+  if (fallbackPrompt) {
+    queries.push(fallbackPrompt);
+  }
+
+  return queries.slice(0, 4);
 }

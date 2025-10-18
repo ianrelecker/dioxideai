@@ -27,7 +27,7 @@ let deleteAllChatsButton;
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
-  searchResultLimit: 6,
+  searchResultLimit: 10,
   theme: 'system',
   sidebarCollapsed: false,
 };
