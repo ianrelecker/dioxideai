@@ -146,9 +146,11 @@ body {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+  position: relative;
 }
 
 #sidebarToggleBtn,
+#supportBtn,
 #settingsBtn {
   cursor: pointer;
   transition: background 0.2s ease, border 0.2s ease;
@@ -163,6 +165,20 @@ body {
   font-size: 0.85rem;
 }
 
+#supportBtn {
+  width: 2.25rem;
+  height: 2.25rem;
+  font-size: 1.05rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#supportBtn.active {
+  background: rgba(92, 141, 255, 0.35);
+  border-color: rgba(92, 141, 255, 0.7);
+}
+
 #settingsBtn {
   width: 2.25rem;
   height: 2.25rem;
@@ -172,11 +188,13 @@ body {
   justify-content: center;
 }
 
+#supportBtn:hover:not(:disabled),
 #settingsBtn:hover:not(:disabled) {
   background: rgba(92, 141, 255, 0.4);
   border-color: rgba(92, 141, 255, 0.8);
 }
 
+#supportBtn:disabled,
 #settingsBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -206,6 +224,13 @@ body.sidebar-collapsed #chatPane {
   color: rgba(245, 245, 247, 0.75);
   max-width: 420px;
   line-height: 1.6;
+}
+
+.empty-state .empty-title {
+  margin: 0 0 0.4rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+  color: #f5f5f7;
 }
 
 .empty-state small {
@@ -498,6 +523,10 @@ body.settings-open {
   overflow: hidden;
 }
 
+body.tutorial-open {
+  overflow: hidden;
+}
+
 .settings-overlay {
   position: fixed;
   inset: 0;
@@ -674,6 +703,21 @@ body.settings-open {
 .settings-actions {
   display: flex;
   justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.support-banner {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  z-index: 1400;
+  max-width: 280px;
+  width: min(280px, 90vw);
+  display: none;
+}
+
+.support-banner.open {
+  display: block;
 }
 
 .settings-actions button {
@@ -696,6 +740,228 @@ body.settings-open {
 .settings-actions button.danger:hover {
   background: rgba(255, 99, 132, 0.25);
   border-color: rgba(255, 99, 132, 0.65);
+}
+
+.support-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 1rem 1.1rem;
+}
+
+.support-card p {
+  margin: 0;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  color: rgba(245, 245, 247, 0.8);
+}
+
+.support-card a {
+  color: #9cb6ff;
+}
+
+.support-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+}
+
+.support-address {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+
+.support-address code {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.35rem 0.45rem;
+  border-radius: 6px;
+  word-break: break-all;
+}
+
+.support-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.support-toggle button {
+  padding: 0.4rem 0.75rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.support-toggle button:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.support-qr {
+  margin: 0;
+  text-align: center;
+  display: none;
+}
+
+.support-qr img {
+  width: 140px;
+  max-width: 100%;
+  height: auto;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.support-qr.revealed img {
+  display: block;
+}
+
+.support-qr.revealed {
+  display: block;
+}
+
+.support-qr figcaption {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: rgba(245, 245, 247, 0.6);
+}
+
+.tutorial-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1500;
+}
+
+.tutorial-overlay.hidden {
+  display: none;
+}
+
+.tutorial-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(10, 12, 18, 0.75);
+  backdrop-filter: blur(6px);
+}
+
+.tutorial-panel {
+  position: relative;
+  max-width: min(720px, 92vw);
+  max-height: 90vh;
+  overflow-y: auto;
+  border-radius: 18px;
+  padding: 1.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+  background: #13161d;
+  color: #f5f5f7;
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.55);
+}
+
+.tutorial-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tutorial-header h2 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+#tutorialCloseBtn {
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.1);
+  color: inherit;
+  cursor: pointer;
+}
+
+#tutorialCloseBtn:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.tutorial-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  line-height: 1.5;
+}
+
+.tutorial-content h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.tutorial-content pre {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  overflow-x: auto;
+}
+
+.tutorial-content ul {
+  margin: 0.35rem 0;
+  padding-left: 1.2rem;
+}
+
+.tutorial-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.tutorial-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+}
+
+.tutorial-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.tutorial-actions .secondary {
+  padding: 0.5rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  text-decoration: none;
+  font-size: 0.85rem;
+}
+
+.tutorial-actions .secondary:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+#tutorialStartBtn {
+  padding: 0.55rem 1.2rem;
+  border-radius: 10px;
+  border: none;
+  background: linear-gradient(135deg, #5c7cff, #8e9eff);
+  color: #0f1013;
+  cursor: pointer;
+  font-weight: 600;
 }
 
 
@@ -908,6 +1174,53 @@ body.theme-light .settings-actions button.danger:hover {
   border-color: rgba(255, 99, 132, 0.5);
 }
 
+body.theme-light .support-card {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.08);
+}
+
+body.theme-light .support-card p {
+  color: rgba(28, 28, 30, 0.75);
+}
+
+body.theme-light .support-card a {
+  color: #2f63e2;
+}
+
+body.theme-light .support-address code {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.12);
+}
+
+body.theme-light .support-qr img {
+  border-color: rgba(0, 0, 0, 0.12);
+}
+
+body.theme-light .support-qr figcaption {
+  color: rgba(28, 28, 30, 0.6);
+}
+
+body.theme-light .tutorial-panel {
+  background: #ffffff;
+  color: #1c1c1e;
+  box-shadow: 0 28px 72px rgba(0, 0, 0, 0.35);
+}
+
+body.theme-light .tutorial-content pre {
+  background: rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+body.theme-light .tutorial-actions .secondary {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #1c1c1e;
+}
+
+body.theme-light .tutorial-actions .secondary:hover {
+  background: rgba(0, 0, 0, 0.12);
+}
+
 body.theme-cream {
   background: #fdf6e6;
   color: #2b2316;
@@ -1098,6 +1411,54 @@ body.theme-cream .settings-actions button.danger:hover {
   border-color: rgba(206, 150, 84, 0.45);
 }
 
+body.theme-cream .support-card {
+  background: rgba(255, 255, 255, 0.65);
+  border-color: rgba(120, 92, 58, 0.18);
+  color: #2b2316;
+}
+
+body.theme-cream .support-card p {
+  color: rgba(58, 44, 28, 0.75);
+}
+
+body.theme-cream .support-card a {
+  color: #c0661a;
+}
+
+body.theme-cream .support-address code {
+  background: rgba(206, 150, 84, 0.18);
+  border-color: rgba(206, 150, 84, 0.32);
+}
+
+body.theme-cream .support-qr img {
+  border-color: rgba(206, 150, 84, 0.28);
+}
+
+body.theme-cream .support-qr figcaption {
+  color: rgba(58, 44, 28, 0.6);
+}
+
+body.theme-cream .tutorial-panel {
+  background: #fffaf1;
+  color: #2b2316;
+  box-shadow: 0 28px 72px rgba(120, 92, 58, 0.25);
+}
+
+body.theme-cream .tutorial-content pre {
+  background: rgba(206, 150, 84, 0.18);
+  border: 1px solid rgba(206, 150, 84, 0.28);
+}
+
+body.theme-cream .tutorial-actions .secondary {
+  background: rgba(120, 92, 58, 0.08);
+  border-color: rgba(120, 92, 58, 0.18);
+  color: #2b2316;
+}
+
+body.theme-cream .tutorial-actions .secondary:hover {
+  background: rgba(120, 92, 58, 0.16);
+}
+
 
 
 
@@ -1113,5 +1474,14 @@ body.theme-cream .settings-actions button.danger:hover {
 
   .message {
     max-width: 85%;
+  }
+
+  .support-banner {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%);
+    margin: 0;
+    width: min(320px, 92vw);
   }
 }

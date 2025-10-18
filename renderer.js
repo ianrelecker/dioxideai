@@ -22,6 +22,16 @@ let searchResultValue;
 let themeSelect;
 let sidebarCollapseToggle;
 let deleteAllChatsButton;
+let tutorialOverlay;
+let tutorialPanel;
+let tutorialCloseButton;
+let tutorialStartButton;
+let tutorialDismissCheckbox;
+let openTutorialButton;
+let supportRevealButton;
+let supportQrFigure;
+let supportPopover;
+let supportButton;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
@@ -29,6 +39,7 @@ const DEFAULT_SETTINGS = {
   searchResultLimit: 10,
   theme: 'system',
   sidebarCollapsed: false,
+  showTutorial: true,
 };
 
 const state = {
@@ -41,6 +52,7 @@ const state = {
   settingsPanelOpen: false,
   activeRequestId: null,
   activeAssistantEntry: null,
+  skipTutorialOnce: false,
 };
 
 const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
@@ -89,6 +101,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   themeSelect = document.getElementById('themeSelect');
   sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
   deleteAllChatsButton = document.getElementById('deleteAllChatsBtn');
+  tutorialOverlay = document.getElementById('tutorialOverlay');
+  tutorialPanel = document.getElementById('tutorialPanel');
+  tutorialCloseButton = document.getElementById('tutorialCloseBtn');
+  tutorialStartButton = document.getElementById('tutorialStartBtn');
+  tutorialDismissCheckbox = document.getElementById('tutorialDismissCheckbox');
+  openTutorialButton = document.getElementById('openTutorialBtn');
+  supportRevealButton = document.getElementById('supportRevealBtn');
+  supportQrFigure = document.getElementById('supportQr');
+  supportPopover = document.getElementById('supportPopover');
+  supportButton = document.getElementById('supportBtn');
 
 
   try {
@@ -184,13 +206,56 @@ function registerUIListeners() {
   );
 
   deleteAllChatsButton?.addEventListener('click', handleDeleteAllChats);
+  supportButton?.addEventListener('click', toggleSupportPopover);
+  openTutorialButton?.addEventListener('click', () => {
+    setWebSearchToggleState(Boolean(state.settings?.autoWebSearch ?? true));
+    if (tutorialDismissCheckbox) {
+      tutorialDismissCheckbox.checked = Boolean(state.settings?.showTutorial ?? true);
+    }
+    openTutorial();
+  });
+  supportRevealButton?.addEventListener('click', () => {
+    if (!supportQrFigure) {
+      return;
+    }
+    supportQrFigure.classList.toggle('revealed');
+    supportRevealButton.textContent = supportQrFigure.classList.contains('revealed')
+      ? 'Hide QR code'
+      : 'Show QR code';
+  });
+
+  document.addEventListener('click', handleGlobalClick, true);
+
+  tutorialOverlay?.addEventListener('click', (event) => {
+    if (event.target === tutorialOverlay) {
+      dismissTutorial();
+    }
+  });
+  tutorialPanel?.addEventListener('click', (event) => event.stopPropagation());
+  tutorialCloseButton?.addEventListener('click', dismissTutorial);
+  tutorialStartButton?.addEventListener('click', async () => {
+    dismissTutorial();
+    promptInput?.focus();
+  });
+  tutorialDismissCheckbox?.addEventListener('change', () => {
+    const shouldShow = tutorialDismissCheckbox.checked;
+    applySettingsUpdate({ showTutorial: shouldShow });
+  });
 
 
 
 
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && state.settingsPanelOpen) {
-      closeSettingsPanel();
+    if (event.key === 'Escape') {
+      if (state.settingsPanelOpen) {
+        closeSettingsPanel();
+      }
+      if (!tutorialOverlay?.classList.contains('hidden')) {
+        dismissTutorial();
+      }
+      if (supportPopover?.classList.contains('open')) {
+        closeSupportPopover();
+      }
     }
   });
 }
@@ -235,9 +300,24 @@ function applySettingsToUI() {
 
   updateSidebarState(Boolean(prefs.sidebarCollapsed));
   applyTheme(prefs.theme || DEFAULT_SETTINGS.theme);
+
+  if (tutorialDismissCheckbox) {
+    tutorialDismissCheckbox.checked = prefs.showTutorial !== false;
+  }
+
+  if (prefs.showTutorial !== false) {
+    if (state.skipTutorialOnce) {
+      state.skipTutorialOnce = false;
+    } else {
+      openTutorial();
+    }
+  } else {
+    dismissTutorial(false);
+  }
 }
 
 function openSettingsPanel() {
+  closeSupportPopover();
   applySettingsToUI();
   settingsOverlay.classList.remove('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'false');
@@ -275,6 +355,88 @@ async function applySettingsUpdate(partial) {
 function setWebSearchToggleState(enabled) {
   state.settings = state.settings || { ...DEFAULT_SETTINGS };
   state.settings.autoWebSearch = Boolean(enabled);
+}
+
+function openTutorial() {
+  if (!tutorialOverlay || !tutorialPanel) {
+    return;
+  }
+  closeSupportPopover();
+  if (tutorialDismissCheckbox) {
+    tutorialDismissCheckbox.checked = state.settings?.showTutorial !== false;
+  }
+  tutorialOverlay.classList.remove('hidden');
+  tutorialOverlay.setAttribute('aria-hidden', 'false');
+  tutorialPanel.setAttribute('tabindex', '-1');
+  tutorialPanel.focus();
+  document.body.classList.add('tutorial-open');
+}
+
+function dismissTutorial(shouldPersist = true) {
+  if (!tutorialOverlay) {
+    return;
+  }
+  closeSupportPopover();
+  if (shouldPersist && tutorialDismissCheckbox) {
+    const shouldShow = tutorialDismissCheckbox.checked;
+    state.skipTutorialOnce = shouldShow;
+    applySettingsUpdate({ showTutorial: shouldShow });
+  } else if (shouldPersist) {
+    state.skipTutorialOnce = false;
+  } else {
+    state.skipTutorialOnce = false;
+  }
+  tutorialOverlay.classList.add('hidden');
+  tutorialOverlay.setAttribute('aria-hidden', 'true');
+  tutorialPanel?.setAttribute('tabindex', '');
+  document.body.classList.remove('tutorial-open');
+}
+
+function toggleSupportPopover(event) {
+  if (event) {
+    event.stopPropagation();
+  }
+  if (!supportPopover || !supportButton) {
+    return;
+  }
+  const isOpen = supportPopover.classList.toggle('open');
+  supportButton.setAttribute('aria-expanded', String(isOpen));
+  if (isOpen) {
+    supportButton.classList.add('active');
+  } else {
+    supportButton.classList.remove('active');
+    supportQrFigure?.classList.remove('revealed');
+    if (supportRevealButton) {
+      supportRevealButton.textContent = 'Show QR code';
+    }
+  }
+}
+
+function closeSupportPopover() {
+  if (!supportPopover || !supportButton) {
+    return;
+  }
+  supportPopover.classList.remove('open');
+  supportButton.classList.remove('active');
+  supportButton.setAttribute('aria-expanded', 'false');
+  supportQrFigure?.classList.remove('revealed');
+  if (supportRevealButton) {
+    supportRevealButton.textContent = 'Show QR code';
+  }
+}
+
+function handleGlobalClick(event) {
+  if (!supportPopover || !supportButton) {
+    return;
+  }
+  if (!supportPopover.classList.contains('open')) {
+    return;
+  }
+  const target = event.target;
+  if (supportPopover.contains(target) || supportButton.contains(target)) {
+    return;
+  }
+  closeSupportPopover();
 }
 
 function updateSearchResultLabel(value) {
@@ -600,6 +762,7 @@ function renderChat(chat) {
     const empty = document.createElement('div');
     empty.classList.add('empty-state');
     empty.innerHTML = `
+      <h2 class="empty-title">DioxideAi</h2>
       <p>Start a conversation by selecting a model and asking a question.</p>
       <small>Your chats are saved locally and appear here.</small>
     `;

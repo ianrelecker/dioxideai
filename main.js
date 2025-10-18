@@ -27,6 +27,7 @@ const DEFAULT_SETTINGS = {
   searchResultLimit: 10,
   theme: 'system',
   sidebarCollapsed: false,
+  showTutorial: true,
 };
 
 const STORE_FILE = 'dioxideai-chats.json';
@@ -952,6 +953,10 @@ function applySettingsPatch(base, partial) {
 
   if (partial.sidebarCollapsed !== undefined) {
     next.sidebarCollapsed = Boolean(partial.sidebarCollapsed);
+  }
+
+  if (partial.showTutorial !== undefined) {
+    next.showTutorial = Boolean(partial.showTutorial);
   }
 
   return next;

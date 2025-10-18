@@ -32,6 +32,7 @@
       "preload.js",
       "renderer.js",
       "styles.css",
+      "assets/**/*",
       "package.json",
       "node_modules/**/*"
     ],

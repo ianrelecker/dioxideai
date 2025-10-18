@@ -31,6 +31,16 @@
             Hide Chats
           </button>
           <button
+            id="supportBtn"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="supportPopover"
+            aria-label="Support DioxideAi"
+          >
+            ♡
+          </button>
+          <button
             id="settingsBtn"
             type="button"
             aria-haspopup="dialog"
@@ -40,6 +50,29 @@
           >
             ⚙︎
           </button>
+          <aside class="support-banner" id="supportPopover" role="dialog" aria-label="Support DioxideAi">
+            <div class="support-card">
+              <strong>Enjoying DioxideAi?</strong>
+              <p>
+                This is a WinRAR-style project: totally free, but tips keep it going. If it saves you time,
+                you can scan or copy the BTC address below, or visit
+                <a href="https://relecker.com" target="_blank" rel="noopener noreferrer">relecker.com</a>.
+              </p>
+              <div class="support-details">
+                <div class="support-address">
+                  <span>BTC</span>
+                  <code>bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068</code>
+                  <div class="support-toggle">
+                    <button type="button" id="supportRevealBtn">Show QR code</button>
+                  </div>
+                </div>
+                <figure class="support-qr" id="supportQr">
+                  <img src="assets/support-btc-qr.jpeg" alt="Bitcoin donation QR code" />
+                  <figcaption>Scan to tip</figcaption>
+                </figure>
+              </div>
+            </div>
+          </aside>
         </div>
       </header>
 
@@ -124,11 +157,79 @@
           </label>
 
           <div class="settings-actions">
+            <button type="button" id="openTutorialBtn">View setup guide</button>
             <button type="button" id="deleteAllChatsBtn" class="danger">Delete all chats…</button>
           </div>
         </fieldset>
 
       </form>
+    </section>
+  </div>
+
+  <div id="tutorialOverlay" class="tutorial-overlay hidden" aria-hidden="true">
+    <div class="tutorial-backdrop"></div>
+    <section
+      id="tutorialPanel"
+      class="tutorial-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="tutorialTitle"
+      tabindex="-1"
+    >
+      <header class="tutorial-header">
+        <h2 id="tutorialTitle">Welcome to DioxideAi</h2>
+        <button id="tutorialCloseBtn" type="button" aria-label="Close onboarding">✕</button>
+      </header>
+      <div class="tutorial-content">
+        <section>
+          <h3>1. Install Ollama</h3>
+          <p>
+            DioxideAi connects to the local Ollama service. Download it from
+            <a href="https://ollama.ai" target="_blank" rel="noopener noreferrer">ollama.ai</a>
+            and run the installer.
+          </p>
+        </section>
+        <section>
+          <h3>2. Start the Ollama service</h3>
+          <p>Keep Ollama running in the background. Launch it from Applications or run:</p>
+          <pre><code>ollama serve</code></pre>
+        </section>
+        <section>
+          <h3>3. Pull a model</h3>
+          <p>Download at least one model before chatting. Common choices:</p>
+          <pre><code>ollama pull llama3:8b
+ollama pull mistral:7b</code></pre>
+        </section>
+        <section>
+          <h3>4. Pick the right size</h3>
+          <p>Match the model to your Mac's GPU/VRAM:</p>
+          <ul>
+            <li><strong>16&nbsp;GB VRAM:</strong> <code>gemma:7b</code>, <code>llama3:8b</code></li>
+            <li><strong>24&nbsp;GB VRAM:</strong> <code>gemma3:12b</code></li>
+            <li><strong>32&nbsp;GB VRAM:</strong> <code>gpt-oss:20b</code></li>
+            <li><strong>48&nbsp;GB VRAM:</strong> <code>llama3:70b</code> (Q4)</li>
+            <li><strong>64&nbsp;GB VRAM and up:</strong> <code>gpt-oss:70b</code>, <code>mixtral:8x22b</code> (Q4/Q5)</li>
+          </ul>
+          <p>Check VRAM via <em>About This Mac → System Report → Graphics/Displays</em>.</p>
+        </section>
+        <section>
+          <h3>5. Connect in DioxideAi</h3>
+          <p>
+            With Ollama running, pick your downloaded model in the header and start chatting. Fresh web context is
+            fetched automatically when needed.
+          </p>
+        </section>
+      </div>
+      <footer class="tutorial-footer">
+        <label class="tutorial-checkbox">
+          <input type="checkbox" id="tutorialDismissCheckbox" checked />
+          <span>Show this guide at startup</span>
+        </label>
+        <div class="tutorial-actions">
+          <a class="secondary" href="https://ollama.ai" target="_blank" rel="noopener noreferrer">Visit Ollama</a>
+          <button id="tutorialStartBtn" type="button">Got it</button>
+        </div>
+      </footer>
     </section>
   </div>
 

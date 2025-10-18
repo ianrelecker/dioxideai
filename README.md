@@ -1,6 +1,6 @@
 # DioxideAi
 
-DioxideAi is a desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with optional live web context pulled directly from DuckDuckGo search results.
+DioxideAi is a desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with optional live web context pulled directly from DuckDuckGo search results. A first-launch guide walks through the Ollama setup steps and can be reopened later from settings.
 
 ## Highlights
 
@@ -11,9 +11,10 @@ DioxideAi is a desktop chat interface for running local large language models th
  - Smart search planning that expands broad prompts (e.g., “latest news”) into focused queries for richer context.
  - Quick header controls (New Chat, hide chats) plus a configurable theme picker.
  - Streaming controls with a Stop button and rich Markdown rendering (code blocks, hyperlinks).
- - Drop links directly into prompts; they’re added to the context alongside web results.
- - Built-in macOS packaging with auto-updates served from GitHub Releases.
- - Local-first storage of every conversation in `app.getPath('userData')`.
+- Drop links directly into prompts; they’re added to the context alongside web results.
+- Built-in macOS packaging with auto-updates served from GitHub Releases.
+- WinRAR-style support panel: totally free, but tips are welcome.
+- Local-first storage of every conversation in `app.getPath('userData')`.
 
 ## Requirements
 
@@ -98,6 +99,13 @@ Chat logs are serialized to JSON at:
 - **macOS**: `~/Library/Application Support/DioxideAi/dioxideai-chats.json`
 
 Preferences live alongside chats in `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.
+
+## Support
+
+The app follows the WinRAR monetisation strategy—use it as much as you like, and chip in only if it earns a spot in your workflow.
+
+- Website: [relecker.com](https://relecker.com)
+- Bitcoin: `bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068`
 
 Delete those files to clear the history and reset settings.
 
