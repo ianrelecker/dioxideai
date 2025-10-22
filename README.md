@@ -1,6 +1,6 @@
 # DioxideAi
 
-DioxideAi is a desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with optional live web context pulled directly from DuckDuckGo search results. A first-launch guide walks through the Ollama setup steps and can be reopened later from settings.
+DioxideAi is a desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with live web context pulled directly from DuckDuckGo search results. A first-launch guide walks through the Ollama setup steps and can be reopened later from settings.
 
 ## Highlights
 
@@ -18,7 +18,7 @@ DioxideAi is a desktop chat interface for running local large language models th
 
 ## Requirements
 
-- macOS (tested on Apple Silicon and Intel)
+- macOS (tested on Apple Silicon)
 - [Node.js](https://nodejs.org/) 18+
 - [Ollama](https://ollama.ai) installed and running (`ollama serve` or the background service)
 - At least one Ollama model pulled locally, e.g. `ollama pull mistral` or `ollama pull llama3`
