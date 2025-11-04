@@ -1,138 +1,90 @@
 # DioxideAi
 
-DioxideAi is a desktop chat interface for running local large language models through [Ollama](https://ollama.ai) with live web context pulled directly from DuckDuckGo search results. A first-launch guide walks through the Ollama setup steps and can be reopened later from settings.
+DioxideAi is a desktop chat client for [Ollama](https://ollama.ai) that automatically augments every prompt with live DuckDuckGo context. Version 2 ships a revamped support dialog, per-install analytics, and a configurable Ollama endpoint for remote servers.
 
 ## Highlights
 
- - Multi-chat workspace with a persistent history sidebar and one-click **New Chat** button.
- - Streaming responses from the Ollama `/api/chat` endpoint, rendered token-by-token.
- - “Thoughts” panel that exposes the assistant’s current step (searching, context retrieved, etc.).
- - Real web search integration powered by DuckDuckGo HTML scraping (no API key required).
- - Smart search planning that expands broad prompts (e.g., “latest news”) into focused queries for richer context.
- - Quick header controls (New Chat, hide chats) plus a configurable theme picker.
- - Streaming controls with a Stop button and rich Markdown rendering (code blocks, hyperlinks).
-- Drop links directly into prompts; they’re added to the context alongside web results.
-- Built-in macOS packaging with auto-updates served from GitHub Releases.
-- WinRAR-style support panel: totally free, but tips are welcome.
-- Local-first storage of every conversation in `app.getPath('userData')`.
+- Multi-chat workspace with persistent history and one-tap **New Chat**.
+- Token streaming from Ollama’s `/api/chat`, plus stop/resume controls.
+- Rich “Thoughts” drawer that mirrors the assistant’s stages (model loading, web search, context ingestion, generation).
+- Automatic DuckDuckGo scraping on *every* user message (no API key required).
+- Attachment support for local `.txt/.md/.json/...` files with per-file and per-request size policing.
+- Customisable Ollama host (defaults to `http://localhost:11434`, but can target any reachable endpoint).
+- Integrated analytics (opt-in, anonymised) powered by Amplitude.
+- Secure support modal with direct QR code and BTC address – free to use, donations welcome.
+- Local-first storage; chats and preferences live under `app.getPath('userData')`.
 
 ## Requirements
 
-- macOS (tested on Apple Silicon)
-- [Node.js](https://nodejs.org/) 18+
-- [Ollama](https://ollama.ai) installed and running (`ollama serve` or the background service)
-- At least one Ollama model pulled locally, e.g. `ollama pull mistral` or `ollama pull llama3`
+- macOS (Apple Silicon/Intel) with [Node.js](https://nodejs.org/) 18+
+- [Ollama](https://ollama.ai) running locally or remotely
+- At least one model pulled via `ollama pull llama3:8b`, `ollama pull mistral`, etc.
 
 ## Setup
 
 ```bash
-git clone <this repo>
+git clone <repo>
 cd dioxideai
 npm install
-```
-
-Ensure the Ollama service is active (`ps aux | grep ollama` or run `ollama serve`) and responds at `http://localhost:11434`.
-
-## Development
-
-```bash
 npm run dev
 ```
 
-This launches the Electron app with auto-reload enabled. Edit the files under `dioxideai/` and the window will refresh automatically.
+The dev script launches Electron with hot reload. Keep the Ollama daemon running (`ollama serve`) or set a remote endpoint in Settings → Connection.
 
 ## Usage
 
-1. Open the app (`npm run dev` or the packaged build).
-2. Click **+ New Chat** or pick an existing conversation from the sidebar (use **Hide Chats** to collapse/expand the history panel).
-3. Select one of the locally installed Ollama models (models are discovered via `GET /api/tags`).
-4. Type a prompt and press **Send** or hit **Enter** (use **Shift+Enter** for a newline).
-5. The main process decides whether to augment the prompt with live context. If it does, it plans a set of DuckDuckGo queries (broad requests like “latest news” are expanded automatically), scrapes the top snippets with `cheerio`, and streams a reply from Ollama’s `/api/chat`.
-6. Responses arrive in real time; include any http(s) links in your prompt and they’ll be added to the context automatically. Use the **Stop** button beside a live response to cancel long generations, and open the “Thoughts” disclosure to inspect retrieved context.
-7. Use the header pills to toggle **Web Search** (defaults to on) and **Hide Chats**. Open the gear icon to adjust additional preferences.
+1. Start the app and ensure a model is selected in the header picker (models are fetched from `/api/tags` on the configured host).
+2. Compose a prompt (drag files into the composer or use **📎 Attach…**) and press **Send**.
+3. The main process always gathers fresh web snippets for the prompt, streams the response from Ollama, and updates the Thoughts panel as context arrives.
+4. Use the **Stop** button to cancel long generations, open Thoughts to inspect retrieved snippets, reasoning, and timing, and toggle **Hide Chats** when you need a distraction-free workspace.
+5. Switch endpoints or refresh the model list from Settings without restarting.
 
-Chats are saved automatically and reloaded when you reopen the application.
+Chats auto-save and reload on launch. Attachment limits are enforced (4 files, 512 KB each, 1 MB total).
 
-## Settings Panel
+## Settings
 
-Click the gear icon in the chat header to open the modal preferences panel:
+Open the gear icon to reveal the modal preferences panel:
 
-- **Automatic web search** – disable to keep the assistant strictly offline.
-- **Open thoughts by default** – auto-expand the reasoning/context drawer for each reply.
-- **Max search results** – slider (1–12) controlling how many snippets are collected from DuckDuckGo per prompt.
-- **Theme** – choose Light, Dark, Cream, or follow the system theme (updates instantly).
-- **Hide chat history sidebar** – collapse the previous chats panel by default.
-- **Delete all chats** – wipe every saved conversation (creates a fresh empty chat immediately).
-- **Export conversation** – save the current chat as Markdown or PDF.
+- **Automatic web search** – opt out if you need fully offline replies.
+- **Max search results** – number of snippets captured per prompt (1–12).
+- **Theme** – system/light/dark/cream themes.
+- **Hide chat history sidebar** – collapse the sidebar by default.
+- **Ollama server endpoint** – URL used for `/api/tags` and `/api/chat` (defaults to `http://localhost:11434`).
+- **Share anonymous usage analytics** – opt in/out of Amplitude tracking.
+- **WinRAR-style support** – modal overlay with QR and BTC address.
+- **Delete all chats** – wipe the history immediately.
 
-Preferences persist in `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.
+All preferences persist at `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.
 
-## Packaging & Updates (macOS)
+## Packaging (macOS)
 
-This project ships with an [electron-builder](https://www.electron.build/) setup that produces a drag-to-Install DMG and wires in auto-updates via `electron-updater`.
+```bash
+npm run dist
+```
 
-1. Set the `build.publish` block in `package.json` to point at your GitHub repo (or another update server). When publishing to GitHub Releases, export a `GH_TOKEN` with repo scope before running the build.
-2. Ensure you have a signing identity installed (`Developer ID Application: …`). Electron Builder will auto-discover it, or you can set `CSC_IDENTITY_AUTO_DISCOVERY=false` and provide `CSC_NAME`.
-3. Build the bundle:
+Electron Builder produces signed DMG/ZIP artifacts under `dist/` and bundles auto-update metadata (`latest-mac.yml`). Configure `build.publish` and export `GH_TOKEN` (or another publisher token) before releasing. Notarise and staple the DMG if you plan to distribute outside the Mac App Store.
 
-   ```bash
-   npm run dist
-   ```
+## Tips & Troubleshooting
 
-   Outputs land inside the `dist/` directory: signed `.dmg` and `.zip` artifacts plus the `.app`.
-
-4. Notarize the `DioxideAi.app` and DMG (e.g., via `xcrun notarytool submit --keychain-profile …`). After notarization, staple the ticket: `xcrun stapler staple dist/DioxideAi.dmg`.
-5. Publish the generated `latest-mac.yml` and artifacts (DMG/ZIP) to your release endpoint. Auto-updates run only in packaged builds and will download/apply new releases automatically, prompting the user to restart once ready.
-
-If you need a custom DMG background or icon, place assets under `build/` and update the `build` section of `package.json`.
-
-## Configuration
-
-- **Web search toggle**: Controlled from the UI or programmatically via `createSearchPlan` helpers in `main.js`.
-- **Context window**: The scraper keeps up to `searchResultLimit` snippets per query (UI slider). Tune logic in `performWebSearch`.
-- **Streaming**: Responses already stream token-by-token. If you prefer batched replies, set `stream: false` in `ask-ollama` and remove the renderer’s stream listeners.
-
-## Data Storage
-
-Chat logs are serialized to JSON at:
-
-- **macOS**: `~/Library/Application Support/DioxideAi/dioxideai-chats.json`
-
-Preferences live alongside chats in `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.
-
-## Support
-
-The app follows the WinRAR monetisation strategy—use it as much as you like, and chip in only if it earns a spot in your workflow.
-
-- Website: [relecker.com](https://relecker.com)
-- Bitcoin: `bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068`
-
-Delete those files to clear the history and reset settings.
-
-## Troubleshooting
-
-- **No models listed**: Confirm Ollama is running and models are installed (`ollama list`).
-- **Slow responses**: Larger models take longer to load; the first query may be slow while the model warms up.
-- **Blocked network**: DuckDuckGo HTML endpoint must be reachable; firewalls or VPNs can interfere with scraping.
-- **Packaging issues**: `npm run dist` uses electron-builder; ensure the signing identity is available and that `publish` is configured before shipping auto-updates.
-
-## Future Enhancements
-
- - Local vector store to ground models on personal notes or documents.
- - Compact density modes and typography options.
- - Per-model defaults, temperature controls, and advanced Ollama parameters.
+| Issue | Fix |
+| --- | --- |
+| No models listed | Verify Ollama is reachable at the configured endpoint (`curl <host>/api/tags`). |
+| Slow first response | Large models need a warm-up load; subsequent calls are faster. |
+| Attachments rejected | Ensure each file is ≤512 KB and the total payload ≤1 MB. |
+| Analytics disabled | Toggle **Share anonymous usage analytics** inside Settings; the client honours the opt-out immediately. |
+| Remote host change | Update the endpoint field, hit Enter (the model list refreshes automatically). |
 
 ## Project Structure
 
 ```
 dioxideai/
-├── main.js        # Electron main process, Ollama + search integration
-├── preload.js     # Secure IPC bridge for renderer
-├── renderer.js    # Chat UI logic
-├── index.html     # Renderer markup
-├── styles.css     # Renderer styles
-├── package.json   # Scripts and dependencies
-└── README.md
+├─ main.js         # Electron main process: Ollama + web search + persistence
+├─ preload.js      # Secure IPC bridge
+├─ renderer.js     # Chat UI logic & state
+├─ index.html      # Renderer markup
+├─ styles.css      # Renderer styles
+├─ config/         # Local analytics key (gitignored) and sample template
+└─ assets/         # Support graphics & app assets
 ```
 
 ## License
