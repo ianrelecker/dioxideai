@@ -1,6 +1,6 @@
 {
   "name": "dioxideai",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Desktop GUI for Ollama-powered chat",
   "main": "main.js",
   "scripts": {
@@ -17,11 +17,13 @@
     "url": "https://github.com/ianrelecker/dioxideai.git"
   },
   "devDependencies": {
-    "electron": "^38.3.0",
+    "electron": "^38.5.0",
     "electron-builder": "^25.1.8",
     "electron-reload": "^2.0.0-alpha.1"
   },
   "dependencies": {
+    "@amplitude/analytics-browser": "^2.30.0",
+    "@amplitude/analytics-node": "^1.5.21",
     "cheerio": "^1.1.2",
     "electron-updater": "^6.1.8",
     "marked": "^16.4.1",
@@ -36,6 +38,8 @@
       "preload.js",
       "renderer.js",
       "styles.css",
+      "config/analytics-key.json",
+      "config/analytics-key.sample.json",
       "assets/**/*",
       "package.json",
       "node_modules/**/*"

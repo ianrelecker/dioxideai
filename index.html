@@ -33,9 +33,9 @@
           <button
             id="supportBtn"
             type="button"
-            aria-haspopup="true"
+            aria-haspopup="dialog"
             aria-expanded="false"
-            aria-controls="supportPopover"
+            aria-controls="supportPanel"
             aria-label="Support DioxideAi"
           >
             ♡
@@ -50,42 +50,56 @@
           >
             ⚙︎
           </button>
-          <aside class="support-banner" id="supportPopover" role="dialog" aria-label="Support DioxideAi">
-            <div class="support-card">
-              <strong>Enjoying DioxideAi?</strong>
-              <p>
-                This is a WinRAR-style project: totally free, but tips keep it going. If it saves you time,
-                you can scan or copy the BTC address below, or visit
-                <a href="https://relecker.com" target="_blank" rel="noopener noreferrer">relecker.com</a>.
-              </p>
-              <div class="support-details">
-                <div class="support-address">
-                  <span>BTC</span>
-                  <code>bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068</code>
-                  <div class="support-toggle">
-                    <button type="button" id="supportRevealBtn">Show QR code</button>
-                  </div>
-                </div>
-                <figure class="support-qr" id="supportQr">
-                  <img src="assets/support-btc-qr.jpeg" alt="Bitcoin donation QR code" />
-                  <figcaption>Scan to tip</figcaption>
-                </figure>
-              </div>
-            </div>
-          </aside>
         </div>
       </header>
 
       <main id="chatArea" role="log" aria-live="polite" aria-label="Chat conversation"></main>
 
-      <form id="inputForm">
-        <textarea
-          id="promptInput"
-          placeholder="Type your question..."
-          aria-label="Your prompt"
-          rows="2"
-        ></textarea>
-        <button type="submit" id="sendBtn">Send</button>
+      <form id="inputForm" aria-label="Compose message">
+        <section
+          id="composer"
+          class="composer"
+          aria-describedby="attachmentHint"
+          data-drop-target="true"
+        >
+          <div class="composer-drop-overlay" aria-hidden="true">
+            <span>Drop files to attach</span>
+          </div>
+
+          <div class="attachment-toolbar">
+            <div class="attachment-actions">
+              <button
+                type="button"
+                id="attachBtn"
+                class="attachment-button"
+                aria-label="Attach local files"
+              >
+                📎 Attach…
+              </button>
+              <span id="attachmentHint" class="attachment-hint">
+                Up to 4 files • 512 KB each (max 1 MB total, 4,000 chars/file)
+              </span>
+            </div>
+            <p id="attachmentNotice" class="attachment-notice" role="status" aria-live="polite"></p>
+          </div>
+
+          <ul
+            id="attachmentList"
+            class="attachment-list hidden"
+            aria-live="polite"
+            aria-label="Selected attachments"
+          ></ul>
+
+          <div class="input-row">
+            <textarea
+              id="promptInput"
+              placeholder="Type your question..."
+              aria-label="Your prompt"
+              rows="2"
+            ></textarea>
+            <button type="submit" id="sendBtn">Send</button>
+          </div>
+        </section>
       </form>
     </section>
   </div>
@@ -116,14 +130,6 @@
             </span>
           </label>
 
-          <label class="setting-toggle">
-            <input type="checkbox" id="openThoughtsToggle" />
-            <span>
-              <strong>Open thoughts drawer by default</strong>
-              <small>Keep the reasoning/context panel expanded for each reply.</small>
-            </span>
-          </label>
-
           <label class="setting-range">
             <div>
               <strong>Max search results per prompt</strong>
@@ -134,20 +140,18 @@
         </fieldset>
 
         <fieldset>
-          <legend>Appearance</legend>
-          <label class="setting-select" for="themeSelect">
+          <legend>Connection</legend>
+          <label class="setting-text" for="ollamaEndpointInput">
             <span>
-              <strong>Theme</strong>
-              <small>Choose light, dark, cream, or follow system settings.</small>
+              <strong>Ollama server endpoint</strong>
+              <small>Defaults to http://localhost:11434</small>
             </span>
-            <select id="themeSelect">
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-              <option value="cream">Cream</option>
-            </select>
+            <input type="url" id="ollamaEndpointInput" inputmode="url" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false" autocapitalize="none" />
           </label>
+        </fieldset>
 
+        <fieldset>
+          <legend>Appearance</legend>
           <label class="setting-toggle">
             <input type="checkbox" id="sidebarCollapseToggle" />
             <span>
@@ -162,7 +166,48 @@
           </div>
         </fieldset>
 
+        <fieldset>
+          <legend>Privacy</legend>
+          <label class="setting-toggle">
+            <input type="checkbox" id="shareAnalyticsToggle" checked />
+            <span>
+              <strong>Share anonymous usage analytics</strong>
+              <small>Help improve DioxideAi by sending basic, anonymized usage events.</small>
+            </span>
+          </label>
+        </fieldset>
       </form>
+    </section>
+  </div>
+
+  <div id="supportOverlay" class="support-overlay hidden" aria-hidden="true">
+    <div class="support-backdrop"></div>
+    <section
+      id="supportPanel"
+      class="support-panel"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="supportTitle"
+      tabindex="-1"
+    >
+      <header class="support-header">
+        <h2 id="supportTitle">Support DioxideAi</h2>
+        <button id="supportCloseBtn" type="button" aria-label="Close support panel">✕</button>
+      </header>
+      <div class="support-card">
+        <strong>Enjoying DioxideAi?</strong>
+        <p>
+          This is a WinRAR-style project: totally free, but tips keep it going. If it saves you time,
+          you can scan or copy the BTC address below, or visit
+          <a href="https://relecker.com" target="_blank" rel="noopener noreferrer">relecker.com</a>.
+        </p>
+        <div class="support-details">
+          <div class="support-address">
+            <span>BTC</span>
+            <code>bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068</code>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 
@@ -225,6 +270,10 @@ ollama pull mistral:7b</code></pre>
           <input type="checkbox" id="tutorialDismissCheckbox" checked />
           <span>Show this guide at startup</span>
         </label>
+        <label class="tutorial-checkbox">
+          <input type="checkbox" id="tutorialAnalyticsCheckbox" checked />
+          <span>Share anonymous usage analytics to help improve DioxideAi</span>
+        </label>
         <div class="tutorial-actions">
           <a class="secondary" href="https://ollama.ai" target="_blank" rel="noopener noreferrer">Visit Ollama</a>
           <button id="tutorialStartBtn" type="button">Got it</button>
@@ -232,6 +281,8 @@ ollama pull mistral:7b</code></pre>
       </footer>
     </section>
   </div>
+
+  <div id="toastHost" class="toast-host" role="status" aria-live="polite" aria-atomic="false"></div>
 
   <script src="renderer.js"></script>
 </body>

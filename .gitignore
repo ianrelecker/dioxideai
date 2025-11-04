@@ -24,3 +24,9 @@ pnpm-debug.log*
 .env.local
 .env.*.local
 node_modules/
+
+# Local analytics secrets
+config/analytics-key.json
+
+# Agent notes (not tracked in git)
+agents.md

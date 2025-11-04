@@ -16,7 +16,6 @@ let settingsPanel;
 let settingsCloseButton;
 let settingsForm;
 let autoWebSearchToggle;
-let openThoughtsToggle;
 let searchResultLimitInput;
 let searchResultValue;
 let themeSelect;
@@ -28,19 +27,35 @@ let tutorialCloseButton;
 let tutorialStartButton;
 let tutorialDismissCheckbox;
 let openTutorialButton;
-let supportRevealButton;
-let supportQrFigure;
-let supportPopover;
+let supportOverlay;
+let supportPanel;
+let supportCloseButton;
 let supportButton;
+let attachButton;
+let attachmentListEl;
+let attachmentNoticeEl;
+let attachmentHintEl;
+let composerEl;
+let toastHost;
+let shareAnalyticsToggle;
+let tutorialAnalyticsCheckbox;
+let ollamaEndpointInput;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
   searchResultLimit: 10,
-  theme: 'system',
+  theme: 'light',
   sidebarCollapsed: false,
   showTutorial: true,
+  shareAnalytics: true,
+  ollamaEndpoint: 'http://localhost:11434',
 };
+
+const ATTACHMENT_LIMIT = 4;
+const ATTACHMENT_MAX_FILE_BYTES = 512 * 1024;
+const ATTACHMENT_TOTAL_BYTES = 1024 * 1024;
+const ATTACHMENT_CHAR_LIMIT = 4000;
 
 const state = {
   chats: [],
@@ -53,7 +68,21 @@ const state = {
   activeRequestId: null,
   activeAssistantEntry: null,
   skipTutorialOnce: false,
+  attachments: [],
+  attachmentBytes: 0,
+  attachmentWarnings: [],
+  attachmentProcessingStartedAt: null,
+  sidebarCollapsed: false,
 };
+
+const activeToasts = new Map();
+let toastIdCounter = 0;
+let dragDepth = 0;
+let globalDropGuardsRegistered = false;
+let attachmentStatusTimer = null;
+const ATTACHMENT_STATUS_REFRESH_MS = 1000;
+let analyticsInitialized = false;
+let analyticsReady = false;
 
 const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
@@ -77,6 +106,586 @@ function stopGeneration(requestId) {
   return window.api.cancelOllama({ requestId });
 }
 
+function formatBytes(value) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let bytes = value;
+  let unitIndex = 0;
+
+  while (bytes >= 1024 && unitIndex < units.length - 1) {
+    bytes /= 1024;
+    unitIndex += 1;
+  }
+
+  const precision = bytes >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${bytes.toFixed(precision)} ${units[unitIndex]}`;
+}
+
+function isFileDrag(event) {
+  const dt = event?.dataTransfer;
+  if (!dt) {
+    return false;
+  }
+  if (dt.types && !Array.from(dt.types).includes('Files')) {
+    return false;
+  }
+  return true;
+}
+
+function showToast(message, { variant = 'info', duration = 6000, action } = {}) {
+  if (!toastHost || !message) {
+    return null;
+  }
+
+  toastIdCounter += 1;
+  const id = `toast-${toastIdCounter}`;
+  const toast = document.createElement('div');
+  toast.classList.add('toast', variant);
+  toast.setAttribute('role', 'status');
+  toast.dataset.toastId = id;
+
+  const text = document.createElement('span');
+  text.textContent = message;
+  toast.appendChild(text);
+
+  if (action && typeof action === 'object' && action.label && typeof action.onClick === 'function') {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = action.label;
+    button.addEventListener('click', () => {
+      try {
+        action.onClick();
+      } finally {
+        dismissToast(id);
+      }
+    });
+    toast.appendChild(button);
+  }
+
+  toastHost.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('visible'));
+
+  const timeoutDuration = Number.isFinite(duration) ? Math.max(0, duration) : 6000;
+  const timeoutId = timeoutDuration ? setTimeout(() => dismissToast(id), timeoutDuration) : null;
+
+  activeToasts.set(id, { element: toast, timeoutId });
+  return id;
+}
+
+function dismissToast(id) {
+  const entry = id ? activeToasts.get(id) : null;
+  if (!entry) {
+    return;
+  }
+
+  const { element, timeoutId } = entry;
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+  }
+
+  element.classList.remove('visible');
+  setTimeout(() => {
+    if (element.parentNode) {
+      element.parentNode.removeChild(element);
+    }
+  }, 220);
+
+  activeToasts.delete(id);
+}
+
+function notifyAttachmentWarnings(warnings) {
+  const next = Array.isArray(warnings) ? warnings.filter(Boolean) : [];
+  state.attachmentWarnings = next;
+  updateAttachmentNoticeText();
+  if (!next.length) {
+    return;
+  }
+
+  next.forEach((message) => {
+    showToast(message, { variant: 'warning', duration: 7000 });
+  });
+}
+
+function trackAnalyticsEvent(name, props = {}) {
+  if (!analyticsReady || typeof window.api.trackAnalyticsEvent !== 'function' || !name) {
+    return;
+  }
+  try {
+    window.api.trackAnalyticsEvent(name, props);
+  } catch (err) {
+    console.error('Failed to track analytics event:', err);
+  }
+}
+
+async function setShareAnalyticsPreference(enabled) {
+  const share = Boolean(enabled);
+  state.settings = state.settings || { ...DEFAULT_SETTINGS };
+  state.settings.shareAnalytics = share;
+
+  if (typeof window.api.initAnalytics !== 'function') {
+    analyticsInitialized = false;
+    analyticsReady = false;
+    return analyticsReady;
+  }
+
+  try {
+    const result = await window.api.initAnalytics({ optOut: !share });
+    analyticsInitialized = Boolean(result?.initialized);
+    analyticsReady = analyticsInitialized && !result?.optedOut;
+  } catch (err) {
+    analyticsInitialized = false;
+    analyticsReady = false;
+    console.error('Failed to initialize analytics:', err);
+  }
+
+  return analyticsReady;
+}
+
+function cloneAttachmentList(list) {
+  return Array.isArray(list) ? list.map((file) => ({ ...file })) : [];
+}
+
+function formatTruncationWarning(name) {
+  const label = typeof name === 'string' && name.trim() ? name.trim() : 'attachment';
+  return `${label} was truncated to the first ${ATTACHMENT_CHAR_LIMIT.toLocaleString()} characters.`;
+}
+
+function computeTruncationWarnings(attachments) {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  const messages = attachments
+    .filter((file) => file && file.truncated)
+    .map((file) => formatTruncationWarning(file.name));
+  return messages.filter((value, index, arr) => value && arr.indexOf(value) === index);
+}
+
+function syncAttachmentsForCurrentChat({ persist = true } = {}) {
+  const chatId = state.currentChatId;
+  if (!chatId || !state.currentChat) {
+    return;
+  }
+
+  state.currentChat.attachments = cloneAttachmentList(state.attachments);
+
+  if (persist && typeof window.api.setChatAttachments === 'function') {
+    const payload = cloneAttachmentList(state.attachments);
+    window.api
+      .setChatAttachments({ chatId, attachments: payload })
+      .catch((err) => console.error('Failed to persist chat attachments:', err));
+  }
+}
+
+function setCurrentChatAttachments(next, { persist = true, keepWarnings = false } = {}) {
+  state.attachments = cloneAttachmentList(next);
+  recalcAttachmentBytes();
+
+  if (!keepWarnings) {
+    notifyAttachmentWarnings([]);
+  }
+
+  renderAttachmentList();
+
+  syncAttachmentsForCurrentChat({ persist });
+}
+
+function composeAttachmentStatusText() {
+  const warnings = Array.isArray(state.attachmentWarnings) ? state.attachmentWarnings : [];
+
+  if (!state.attachments.length) {
+    return warnings.join(' ') || '';
+  }
+
+  const count = state.attachments.length;
+  const countLabel = count === 1 ? '1 file' : `${count} files`;
+  const totalBytes =
+    state.attachmentBytes > 0
+      ? state.attachmentBytes
+      : state.attachments.reduce((sum, file) => {
+          const size = Number(file.size) || 0;
+          return sum + (Number.isFinite(size) ? size : 0);
+        }, 0);
+  const totalLabel = formatBytes(totalBytes);
+  const infoParts = [];
+
+  if (state.isStreaming) {
+    const startedAt = typeof state.attachmentProcessingStartedAt === 'number' ? state.attachmentProcessingStartedAt : null;
+    const elapsedMs = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
+    const elapsedLabel = elapsedMs >= 1000 ? formatDuration(elapsedMs) : null;
+    let line = `⏳ Processing ${countLabel} (${totalLabel})…`;
+    if (elapsedLabel) {
+      line += ` ${elapsedLabel} elapsed.`;
+    }
+    infoParts.push(line);
+    infoParts.push('File-backed replies can take longer than text-only prompts.');
+  } else {
+    infoParts.push(`Ready to send ${countLabel} (${totalLabel}) with your next prompt.`);
+  }
+
+  const truncatedFiles = state.attachments.filter((file) => file.truncated);
+  if (truncatedFiles.length) {
+    const names = truncatedFiles.map((file) => file.name || 'attachment');
+    const preview = names.slice(0, 3).join(', ');
+    const remainder = names.length - Math.min(names.length, 3);
+    const suffix = remainder > 0 ? `, and ${remainder} more` : '';
+    infoParts.push(`Trimmed to ${ATTACHMENT_CHAR_LIMIT.toLocaleString()} characters: ${preview}${suffix}.`);
+  }
+
+  if (warnings.length) {
+    infoParts.push(...warnings);
+  }
+
+  return infoParts.join(' ').trim();
+}
+
+function updateAttachmentNoticeText() {
+  if (!attachmentNoticeEl) {
+    return;
+  }
+  attachmentNoticeEl.textContent = composeAttachmentStatusText();
+}
+
+function startAttachmentStatusTimer() {
+  if (attachmentStatusTimer) {
+    return;
+  }
+  attachmentStatusTimer = setInterval(() => {
+    if (!state.isStreaming || !state.attachments.length) {
+      stopAttachmentStatusTimer();
+      updateAttachmentNoticeText();
+      return;
+    }
+    updateAttachmentNoticeText();
+  }, ATTACHMENT_STATUS_REFRESH_MS);
+}
+
+function stopAttachmentStatusTimer() {
+  if (attachmentStatusTimer) {
+    clearInterval(attachmentStatusTimer);
+    attachmentStatusTimer = null;
+  }
+  state.attachmentProcessingStartedAt = null;
+  updateAttachmentNoticeText();
+}
+
+function setComposerDragState(active) {
+  if (!composerEl) {
+    return;
+  }
+  if (active) {
+    composerEl.classList.add('drag-active');
+  } else {
+    composerEl.classList.remove('drag-active');
+  }
+}
+
+function registerGlobalDropGuards() {
+  if (globalDropGuardsRegistered) {
+    return;
+  }
+
+  const guard = (event) => {
+    if (isFileDrag(event)) {
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'copy';
+      }
+    }
+  };
+
+  const guardDrop = (event) => {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    if (composerEl && composerEl.contains(event.target)) {
+      return;
+    }
+    event.preventDefault();
+  };
+
+  window.addEventListener('dragover', guard);
+  window.addEventListener('drop', guardDrop);
+
+  globalDropGuardsRegistered = true;
+}
+
+function registerComposerDropZone() {
+  if (!composerEl) {
+    return;
+  }
+
+  const handleDragEnter = (event) => {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    dragDepth += 1;
+    event.preventDefault();
+    setComposerDragState(true);
+  };
+
+  const handleDragOver = (event) => {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const handleDragLeave = (event) => {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) {
+      setComposerDragState(false);
+    }
+  };
+
+  const handleDrop = async (event) => {
+    if (!isFileDrag(event)) {
+      return;
+    }
+    event.preventDefault();
+    dragDepth = 0;
+    setComposerDragState(false);
+
+    if (state.isStreaming) {
+      showToast('Wait for the current reply to finish before adding files.', { variant: 'warning', duration: 5000 });
+      return;
+    }
+
+    const files = Array.from(event.dataTransfer?.files || []);
+    const paths = files
+      .map((file) => (file && typeof file.path === 'string' ? file.path : null))
+      .filter(Boolean);
+
+    if (!paths.length) {
+      showToast('Only local files can be attached at the moment.', { variant: 'warning', duration: 5000 });
+      return;
+    }
+
+    const uniquePaths = Array.from(new Set(paths));
+    await requestAttachmentLoad({ droppedPaths: uniquePaths });
+  };
+
+  composerEl.addEventListener('dragenter', handleDragEnter);
+  composerEl.addEventListener('dragover', handleDragOver);
+  composerEl.addEventListener('dragleave', handleDragLeave);
+  composerEl.addEventListener('drop', handleDrop);
+}
+
+function recalcAttachmentBytes() {
+  state.attachmentBytes = state.attachments.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0);
+}
+
+function updateAttachmentHint() {
+  if (!attachmentHintEl) {
+    return;
+  }
+  const count = state.attachments.length;
+  const total = state.attachmentBytes;
+  const base = `Up to ${ATTACHMENT_LIMIT} files • ${formatBytes(ATTACHMENT_MAX_FILE_BYTES)} each (max ${formatBytes(ATTACHMENT_TOTAL_BYTES)} total, ${ATTACHMENT_CHAR_LIMIT.toLocaleString()} chars/file)`;
+  if (!count) {
+    attachmentHintEl.textContent = base;
+    return;
+  }
+  attachmentHintEl.textContent = `${base} (${count} selected • ${formatBytes(total)} total)`;
+}
+
+function renderAttachmentList() {
+  if (!attachmentListEl) {
+    return;
+  }
+
+  attachmentListEl.innerHTML = '';
+
+  if (!state.attachments.length) {
+    attachmentListEl.classList.add('hidden');
+    updateAttachmentNoticeText();
+    updateAttachmentHint();
+    return;
+  }
+
+  attachmentListEl.classList.remove('hidden');
+
+  state.attachments.forEach((file) => {
+    const li = document.createElement('li');
+    li.dataset.id = file.id;
+
+    const name = document.createElement('span');
+    name.classList.add('attachment-name');
+    name.textContent = file.name || 'attachment.txt';
+    li.appendChild(name);
+
+    const meta = document.createElement('span');
+    meta.classList.add('attachment-meta');
+    const sizeLabel = file.displaySize || formatBytes(file.size || file.bytes || 0);
+    meta.textContent = file.truncated ? `${sizeLabel} • truncated` : sizeLabel;
+    li.appendChild(meta);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.classList.add('attachment-remove');
+    removeBtn.setAttribute('aria-label', `Remove ${file.name}`);
+    removeBtn.textContent = '✕';
+    removeBtn.addEventListener('click', () => removeAttachment(file.id));
+    li.appendChild(removeBtn);
+
+    attachmentListEl.appendChild(li);
+  });
+
+  updateAttachmentNoticeText();
+  updateAttachmentHint();
+}
+
+function removeAttachment(id) {
+  const index = state.attachments.findIndex((file) => file.id === id);
+  if (index === -1) {
+    return;
+  }
+
+  const removed = state.attachments[index];
+  const next = state.attachments.filter((file) => file.id !== id);
+  const nextWarnings = computeTruncationWarnings(next);
+  notifyAttachmentWarnings(nextWarnings);
+  setCurrentChatAttachments(next, { persist: true, keepWarnings: true });
+
+  if (removed) {
+    if (!next.length) {
+      stopAttachmentStatusTimer();
+    }
+    trackAnalyticsEvent('attachment_removed', {
+      total: next.length,
+    });
+    offerAttachmentUndo(removed);
+  }
+}
+
+async function handleAttachmentPick() {
+  if (state.isStreaming) {
+    return;
+  }
+  await requestAttachmentLoad();
+}
+
+function offerAttachmentUndo(file) {
+  if (!file) {
+    return;
+  }
+  showToast(`${file.name} removed from this prompt.`, {
+    variant: 'info',
+    duration: 7000,
+    action: {
+      label: 'Undo',
+      onClick: () => restoreAttachment(file),
+    },
+  });
+}
+
+function restoreAttachment(file) {
+  if (!file) {
+    return;
+  }
+
+  if (state.attachments.some((item) => item.id === file.id)) {
+    return;
+  }
+
+  const next = [...state.attachments, { ...file }];
+  const warnings = computeTruncationWarnings(next);
+  notifyAttachmentWarnings(warnings);
+  setCurrentChatAttachments(next, { persist: true, keepWarnings: true });
+  trackAnalyticsEvent('attachment_restored', {
+    total: next.length,
+  });
+}
+
+async function requestAttachmentLoad(extraOptions = {}) {
+  if (typeof window.api.pickLocalFiles !== 'function') {
+    return;
+  }
+
+  try {
+    const result = await window.api.pickLocalFiles({
+      existingCount: state.attachments.length,
+      existingBytes: state.attachmentBytes,
+      ...extraOptions,
+    });
+
+    applyAttachmentSelection(result);
+  } catch (err) {
+    const fallbackWarning = `Unable to attach files: ${err?.message || 'Unknown error.'}`;
+    notifyAttachmentWarnings([fallbackWarning]);
+    renderAttachmentList();
+  }
+}
+
+function applyAttachmentSelection(result) {
+  if (!result || result.canceled) {
+    return;
+  }
+
+  const warnings = [];
+  const appendWarnings = (items) => {
+    if (!Array.isArray(items)) {
+      return;
+    }
+    items.forEach((item) => {
+      if (!item) {
+        return;
+      }
+      if (typeof item === 'string') {
+        warnings.push(item);
+      } else if (item.reason) {
+        warnings.push(item.reason);
+      }
+    });
+  };
+
+  appendWarnings(result.rejected);
+
+  const nextAttachments = [...state.attachments];
+
+  if (Array.isArray(result.files) && result.files.length) {
+    result.files.forEach((file) => {
+      const record = {
+        id: file.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        name: file.name,
+        size: file.size,
+        bytes: file.bytes,
+        displaySize: file.displaySize,
+        truncated: Boolean(file.truncated),
+        content: file.content,
+      };
+      nextAttachments.push(record);
+      if (record.truncated) {
+        warnings.push(formatTruncationWarning(record.name));
+      }
+    });
+  }
+
+  appendWarnings(result.warnings);
+
+  if (nextAttachments.length >= ATTACHMENT_LIMIT) {
+    warnings.push('Attachment limit reached.');
+  }
+
+  const uniqueWarnings = warnings.filter((value, index, arr) => value && arr.indexOf(value) === index);
+  notifyAttachmentWarnings(uniqueWarnings);
+  setCurrentChatAttachments(nextAttachments, { persist: true, keepWarnings: true });
+  if (Array.isArray(result.files) && result.files.length) {
+    trackAnalyticsEvent('attachments_added', {
+      added: result.files.length,
+      total: nextAttachments.length,
+    });
+  }
+}
+
 window.addEventListener('DOMContentLoaded', async () => {
 
   modelSelect = document.getElementById('modelSelect');
@@ -95,7 +704,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   settingsCloseButton = document.getElementById('settingsCloseBtn');
   settingsForm = document.getElementById('settingsForm');
   autoWebSearchToggle = document.getElementById('autoWebSearchToggle');
-  openThoughtsToggle = document.getElementById('openThoughtsToggle');
   searchResultLimitInput = document.getElementById('searchResultLimit');
   searchResultValue = document.getElementById('searchResultValue');
   themeSelect = document.getElementById('themeSelect');
@@ -107,15 +715,27 @@ window.addEventListener('DOMContentLoaded', async () => {
   tutorialStartButton = document.getElementById('tutorialStartBtn');
   tutorialDismissCheckbox = document.getElementById('tutorialDismissCheckbox');
   openTutorialButton = document.getElementById('openTutorialBtn');
-  supportRevealButton = document.getElementById('supportRevealBtn');
-  supportQrFigure = document.getElementById('supportQr');
-  supportPopover = document.getElementById('supportPopover');
+  supportOverlay = document.getElementById('supportOverlay');
+  supportPanel = document.getElementById('supportPanel');
+  supportCloseButton = document.getElementById('supportCloseBtn');
   supportButton = document.getElementById('supportBtn');
+  attachButton = document.getElementById('attachBtn');
+  attachmentListEl = document.getElementById('attachmentList');
+  attachmentNoticeEl = document.getElementById('attachmentNotice');
+  attachmentHintEl = document.getElementById('attachmentHint');
+  composerEl = document.getElementById('composer');
+  toastHost = document.getElementById('toastHost');
+  shareAnalyticsToggle = document.getElementById('shareAnalyticsToggle');
+  tutorialAnalyticsCheckbox = document.getElementById('tutorialAnalyticsCheckbox');
+  ollamaEndpointInput = document.getElementById('ollamaEndpointInput');
 
+  registerGlobalDropGuards();
 
   try {
     registerStreamHandlers();
     registerUIListeners();
+    registerComposerDropZone();
+    renderAttachmentList();
     updateInteractivity();
     await loadSettings();
     await populateModels();
@@ -134,6 +754,11 @@ async function initializeChats() {
   } else {
     await handleNewChat();
   }
+
+  trackAnalyticsEvent('app_opened', {
+    chat_count: state.chats.length,
+    has_existing_chat: state.chats.length > 0,
+  });
 }
 
 function registerUIListeners() {
@@ -161,8 +786,15 @@ function registerUIListeners() {
     }
   });
 
+  attachButton?.addEventListener('click', async () => {
+    if (state.isStreaming) {
+      return;
+    }
+    await handleAttachmentPick();
+  });
+
   sidebarToggleBtn?.addEventListener('click', () => {
-    const nextValue = !(state.settings?.sidebarCollapsed ?? false);
+    const nextValue = !state.sidebarCollapsed;
     updateSidebarState(nextValue);
     applySettingsUpdate({ sidebarCollapsed: nextValue });
   });
@@ -185,9 +817,6 @@ function registerUIListeners() {
   autoWebSearchToggle?.addEventListener('change', () =>
     applySettingsUpdate({ autoWebSearch: autoWebSearchToggle.checked })
   );
-  openThoughtsToggle?.addEventListener('change', () =>
-    applySettingsUpdate({ openThoughtsByDefault: openThoughtsToggle.checked })
-  );
   themeSelect?.addEventListener('change', () => {
     const nextTheme = themeSelect.value;
     applyTheme(nextTheme);
@@ -198,6 +827,35 @@ function registerUIListeners() {
     updateSidebarState(next);
     applySettingsUpdate({ sidebarCollapsed: next });
   });
+  shareAnalyticsToggle?.addEventListener('change', async () => {
+    const enabled = shareAnalyticsToggle.checked;
+    const wasReady = analyticsReady;
+    if (!enabled && wasReady) {
+      trackAnalyticsEvent('analytics_disabled', { source: 'settings' });
+    }
+    await setShareAnalyticsPreference(enabled);
+    applySettingsUpdate({ shareAnalytics: enabled });
+    if (enabled) {
+      trackAnalyticsEvent('analytics_enabled', { source: 'settings' });
+    }
+  });
+  tutorialAnalyticsCheckbox?.addEventListener('change', async () => {
+    const enabled = tutorialAnalyticsCheckbox.checked;
+    const wasReady = analyticsReady;
+    if (!enabled && wasReady) {
+      trackAnalyticsEvent('analytics_disabled', { source: 'tutorial' });
+    }
+    await setShareAnalyticsPreference(enabled);
+    applySettingsUpdate({ shareAnalytics: enabled });
+    if (enabled) {
+      trackAnalyticsEvent('analytics_enabled', { source: 'tutorial' });
+    }
+  });
+  ollamaEndpointInput?.addEventListener('change', async () => {
+    const value = typeof ollamaEndpointInput.value === 'string' ? ollamaEndpointInput.value.trim() : '';
+    await applySettingsUpdate({ ollamaEndpoint: value });
+    await populateModels();
+  });
   searchResultLimitInput?.addEventListener('input', () =>
     updateSearchResultLabel(Number(searchResultLimitInput.value))
   );
@@ -207,25 +865,26 @@ function registerUIListeners() {
 
   deleteAllChatsButton?.addEventListener('click', handleDeleteAllChats);
   supportButton?.addEventListener('click', toggleSupportPopover);
+  supportCloseButton?.addEventListener('click', (event) => {
+    event.preventDefault();
+    closeSupportPopover();
+  });
+  supportOverlay?.addEventListener('click', (event) => {
+    if (event.target === supportOverlay || event.target.classList?.contains('support-backdrop')) {
+      closeSupportPopover();
+    }
+  });
+  supportPanel?.addEventListener('click', (event) => event.stopPropagation());
   openTutorialButton?.addEventListener('click', () => {
     setWebSearchToggleState(Boolean(state.settings?.autoWebSearch ?? true));
     if (tutorialDismissCheckbox) {
       tutorialDismissCheckbox.checked = Boolean(state.settings?.showTutorial ?? true);
     }
+    if (tutorialAnalyticsCheckbox) {
+      tutorialAnalyticsCheckbox.checked = Boolean(state.settings?.shareAnalytics !== false);
+    }
     openTutorial();
   });
-  supportRevealButton?.addEventListener('click', () => {
-    if (!supportQrFigure) {
-      return;
-    }
-    supportQrFigure.classList.toggle('revealed');
-    supportRevealButton.textContent = supportQrFigure.classList.contains('revealed')
-      ? 'Hide QR code'
-      : 'Show QR code';
-  });
-
-  document.addEventListener('click', handleGlobalClick, true);
-
   tutorialOverlay?.addEventListener('click', (event) => {
     if (event.target === tutorialOverlay) {
       dismissTutorial();
@@ -253,7 +912,7 @@ function registerUIListeners() {
       if (!tutorialOverlay?.classList.contains('hidden')) {
         dismissTutorial();
       }
-      if (supportPopover?.classList.contains('open')) {
+      if (supportOverlay && !supportOverlay.classList.contains('hidden')) {
         closeSupportPopover();
       }
     }
@@ -269,6 +928,7 @@ async function loadSettings() {
     state.settings = state.settings || { ...DEFAULT_SETTINGS };
   }
 
+  await setShareAnalyticsPreference(state.settings.shareAnalytics !== false);
   applySettingsToUI();
 }
 
@@ -280,8 +940,14 @@ function applySettingsToUI() {
   }
   setWebSearchToggleState(Boolean(prefs.autoWebSearch));
 
-  if (openThoughtsToggle) {
-    openThoughtsToggle.checked = Boolean(prefs.openThoughtsByDefault);
+  if (shareAnalyticsToggle) {
+    shareAnalyticsToggle.checked = prefs.shareAnalytics !== false;
+  }
+  if (tutorialAnalyticsCheckbox) {
+    tutorialAnalyticsCheckbox.checked = prefs.shareAnalytics !== false;
+  }
+  if (ollamaEndpointInput) {
+    ollamaEndpointInput.value = prefs.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
   }
 
   const limit = clampSearchLimitForUI(prefs.searchResultLimit);
@@ -346,6 +1012,9 @@ async function applySettingsUpdate(partial) {
   try {
     const updated = await window.api.updateSettings(partial);
     state.settings = { ...DEFAULT_SETTINGS, ...updated };
+    if (partial && Object.prototype.hasOwnProperty.call(partial, 'shareAnalytics')) {
+      await setShareAnalyticsPreference(state.settings.shareAnalytics !== false);
+    }
     applySettingsToUI();
   } catch (err) {
     console.error('Failed to update settings:', err);
@@ -364,6 +1033,9 @@ function openTutorial() {
   closeSupportPopover();
   if (tutorialDismissCheckbox) {
     tutorialDismissCheckbox.checked = state.settings?.showTutorial !== false;
+  }
+  if (tutorialAnalyticsCheckbox) {
+    tutorialAnalyticsCheckbox.checked = state.settings?.shareAnalytics !== false;
   }
   tutorialOverlay.classList.remove('hidden');
   tutorialOverlay.setAttribute('aria-hidden', 'false');
@@ -396,47 +1068,47 @@ function toggleSupportPopover(event) {
   if (event) {
     event.stopPropagation();
   }
-  if (!supportPopover || !supportButton) {
+  if (!supportOverlay || !supportButton) {
     return;
   }
-  const isOpen = supportPopover.classList.toggle('open');
-  supportButton.setAttribute('aria-expanded', String(isOpen));
-  if (isOpen) {
+  const shouldOpen = supportOverlay.classList.contains('hidden');
+  if (shouldOpen) {
+    supportOverlay.classList.remove('hidden');
+    supportOverlay.setAttribute('aria-hidden', 'false');
     supportButton.classList.add('active');
-  } else {
-    supportButton.classList.remove('active');
-    supportQrFigure?.classList.remove('revealed');
-    if (supportRevealButton) {
-      supportRevealButton.textContent = 'Show QR code';
+    supportButton.setAttribute('aria-expanded', 'true');
+    document.body.classList.add('support-open');
+    if (supportPanel) {
+      supportPanel.setAttribute('tabindex', '-1');
+      if (typeof supportPanel.focus === 'function') {
+        try {
+          supportPanel.focus({ preventScroll: true });
+        } catch (err) {
+          supportPanel.focus();
+        }
+      }
     }
+  } else {
+    closeSupportPopover();
   }
 }
 
 function closeSupportPopover() {
-  if (!supportPopover || !supportButton) {
+  if (!supportOverlay || !supportButton) {
     return;
   }
-  supportPopover.classList.remove('open');
+  if (supportOverlay.classList.contains('hidden')) {
+    return;
+  }
+  supportOverlay.classList.add('hidden');
+  supportOverlay.setAttribute('aria-hidden', 'true');
   supportButton.classList.remove('active');
   supportButton.setAttribute('aria-expanded', 'false');
-  supportQrFigure?.classList.remove('revealed');
-  if (supportRevealButton) {
-    supportRevealButton.textContent = 'Show QR code';
+  document.body.classList.remove('support-open');
+  supportPanel?.setAttribute('tabindex', '');
+  if (typeof supportButton.focus === 'function') {
+    supportButton.focus();
   }
-}
-
-function handleGlobalClick(event) {
-  if (!supportPopover || !supportButton) {
-    return;
-  }
-  if (!supportPopover.classList.contains('open')) {
-    return;
-  }
-  const target = event.target;
-  if (supportPopover.contains(target) || supportButton.contains(target)) {
-    return;
-  }
-  closeSupportPopover();
 }
 
 function updateSearchResultLabel(value) {
@@ -469,6 +1141,7 @@ function registerStreamHandlers() {
       state.activeRequestId = null;
       state.activeAssistantEntry = null;
       updateInteractivity();
+      stopAttachmentStatusTimer();
       return;
     }
 
@@ -480,6 +1153,7 @@ function registerStreamHandlers() {
       state.activeRequestId = null;
       state.activeAssistantEntry = null;
       updateInteractivity();
+      stopAttachmentStatusTimer();
       return;
     }
 
@@ -487,13 +1161,32 @@ function registerStreamHandlers() {
       entry.setContent(data.full);
     }
 
+    if (typeof data.reasoning === 'string') {
+      const trimmed = data.reasoning.trim();
+      entry.setReasoning(data.reasoning);
+      if (trimmed && !entry.__autoOpenedReasoning) {
+        entry.openThoughts();
+        entry.__autoOpenedReasoning = true;
+      }
+    }
+
+    if (data.timing) {
+      const summary = formatTimingSummary(data.timing);
+      if (summary) {
+        entry.setTiming(summary);
+      }
+    }
+
     if (data.done) {
+      entry.stopLoading?.();
       entry.clearActions();
+      entry.setSummary('');
       state.pendingAssistantByChat.delete(data.chatId);
       state.isStreaming = false;
       state.activeRequestId = null;
       state.activeAssistantEntry = null;
       updateInteractivity();
+      stopAttachmentStatusTimer();
     }
   });
 
@@ -503,34 +1196,76 @@ function registerStreamHandlers() {
       return;
     }
 
-    if (data.stage === 'search-plan' || data.stage === 'search-started') {
-      entry.setSummary('Notes');
-      entry.setThought(
-        formatSearchPlanThought({
-          message: data.message || 'Preparing web search queries.',
-          queries: data.queries,
-        })
-      );
-    } else if (data.stage === 'context') {
-      const hasContext = Boolean(data.context?.trim());
-      entry.setSummary(hasContext ? 'Web Context' : 'Notes');
-      entry.setThought(
-        formatContextThought({
-          message: data.context?.trim()
-            ? data.message || 'Context gathered from the web.'
-            : data.message || 'No additional context used.',
-          context: data.context,
-          queries: data.queries,
-          retrievedAt: data.retrievedAt,
-        })
-      );
-      entry.closeThoughts();
+    const deriveStatus = (fallback) =>
+      (typeof data.message === 'string' && data.message.trim()) || fallback;
+
+    switch (data.stage) {
+      case 'model-loading': {
+        const status = deriveStatus('Loading model…');
+        entry.setSummary(status);
+        entry.setLoadingStatus?.(status);
+        break;
+      }
+      case 'generating': {
+        const status = deriveStatus('Generating response…');
+        entry.setSummary(status);
+        entry.setLoadingStatus?.(status);
+        break;
+      }
+      case 'search-plan':
+      case 'search-started': {
+        const status = deriveStatus('Searching the web…');
+        entry.setSummary(status);
+        entry.setLoadingStatus?.(status);
+        entry.setThought(
+          formatSearchPlanThought({
+            message: data.message || 'Preparing web search queries.',
+            queries: data.queries,
+          })
+        );
+        break;
+      }
+      case 'context': {
+        const hasContext =
+          Boolean(data.context?.trim()) ||
+          (Array.isArray(data.attachments) && data.attachments.length > 0);
+        const status = deriveStatus(
+          hasContext ? 'Reviewing gathered context…' : 'No additional context used.'
+        );
+        entry.setSummary(status);
+        entry.setLoadingStatus?.(status);
+        entry.setThought(
+          formatContextThought({
+            message: data.context?.trim()
+              ? data.message || 'Context gathered from the web.'
+              : data.message || 'No additional context used.',
+            context: data.context,
+            queries: data.queries,
+            retrievedAt: data.retrievedAt,
+            attachments: data.attachments,
+            warnings: data.attachmentWarnings,
+          })
+        );
+        const thoughtState = entry.getThoughtState ? entry.getThoughtState() : null;
+        const hasReasoning = Boolean(thoughtState?.reasoning);
+        if (hasReasoning || (state.settings?.openThoughtsByDefault ?? false)) {
+          entry.openThoughts();
+        } else if (!hasContext) {
+          entry.closeThoughts();
+        } else {
+          entry.closeThoughts();
+        }
+        break;
+      }
+      default:
+        break;
     }
   });
 }
 
 async function populateModels() {
   setModelControlsDisabled(true);
+  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
 
   try {
     const models = await window.api.getModels();
@@ -538,11 +1273,15 @@ async function populateModels() {
 
     if (!models.length) {
       const option = document.createElement('option');
-      option.textContent = 'No models found';
+      option.textContent = `No models detected at ${endpoint}`;
       option.value = '';
       option.disabled = true;
       option.selected = true;
       modelSelect.appendChild(option);
+      showToast(`No Ollama models detected at ${endpoint}. Start Ollama and refresh.`, {
+        variant: 'warning',
+        duration: 8000,
+      });
       return;
     }
 
@@ -556,11 +1295,15 @@ async function populateModels() {
     console.error(err);
     modelSelect.innerHTML = '';
     const option = document.createElement('option');
-    option.textContent = 'Failed to load models';
+    option.textContent = `Unable to reach Ollama at ${endpoint}`;
     option.value = '';
     option.disabled = true;
     option.selected = true;
     modelSelect.appendChild(option);
+    showToast(`Unable to reach Ollama at ${endpoint}. Ensure it is running and click refresh.`, {
+      variant: 'warning',
+      duration: 8000,
+    });
   } finally {
     setModelControlsDisabled(false);
   }
@@ -596,17 +1339,41 @@ async function handlePromptSubmit() {
   promptInput.value = '';
   promptInput.focus();
 
+  const attachmentsPayload = state.attachments.map((file) => ({
+    id: file.id,
+    name: file.name,
+    size: file.size,
+    bytes: file.bytes,
+    truncated: Boolean(file.truncated),
+    content: file.content,
+  }));
+
+  trackAnalyticsEvent('prompt_submitted', {
+    chat_id: chatId,
+    model,
+    prompt_chars: prompt.length,
+    attachments: state.attachments.length,
+  });
+
   state.isStreaming = true;
   updateInteractivity();
+  const hasAttachments = state.attachments.length > 0;
+  stopAttachmentStatusTimer();
+  if (hasAttachments) {
+    state.attachmentProcessingStartedAt = Date.now();
+    startAttachmentStatusTimer();
+  }
+  renderAttachmentList();
 
   const requestId = createRequestId();
   const userLinks = extractLinks(prompt);
 
   const assistantEntry = appendAssistantMessage('', {
     open: false,
-    thoughts: 'Preparing response…',
-    summary: 'Notes',
+    thoughts: '',
+    summary: 'Loading model…',
     loading: true,
+    loadingStatus: 'Loading model…',
   });
 
   const stopButton = document.createElement('button');
@@ -627,6 +1394,7 @@ async function handlePromptSubmit() {
     });
   });
   assistantEntry.addActionButton(stopButton);
+  assistantEntry.__autoOpenedReasoning = false;
 
   state.pendingAssistantByChat.set(chatId, assistantEntry);
   state.activeRequestId = requestId;
@@ -639,6 +1407,7 @@ async function handlePromptSubmit() {
       prompt,
       requestId,
       userLinks,
+      attachments: attachmentsPayload,
     });
 
     assistantEntry.clearActions();
@@ -650,6 +1419,8 @@ async function handlePromptSubmit() {
       state.pendingAssistantByChat.delete(chatId);
       state.isStreaming = false;
       updateInteractivity();
+      stopAttachmentStatusTimer();
+      renderAttachmentList();
       return;
     }
 
@@ -663,23 +1434,49 @@ async function handlePromptSubmit() {
       state.pendingAssistantByChat.delete(chatId);
       state.isStreaming = false;
       updateInteractivity();
+      stopAttachmentStatusTimer();
+      renderAttachmentList();
+      trackAnalyticsEvent('response_error', {
+        type: 'model_error',
+        message: String(result.error || '').slice(0, 120),
+      });
       return;
     }
 
+    const reasoningText = result.reasoning?.trim() || '';
     const hasContext = Boolean(result.context);
-    const contextSummary = hasContext ? 'Web Context' : 'Notes';
+    const contextSummary = hasContext ? 'Web Context' : 'Context';
+
     assistantEntry.setSummary(contextSummary);
+    if (reasoningText) {
+      assistantEntry.setReasoning(reasoningText);
+    }
+    const contextMessage = result.usedWebSearch
+      ? 'Web search context applied to compose the answer.'
+      : result.reusedConversationMemory
+        ? 'Relied on earlier conversation and cached context.'
+        : result.context
+          ? 'Included user-provided references.'
+          : 'No additional context used.';
     assistantEntry.setThought(
       formatContextThought({
-        message: result.context
-          ? 'Context applied to compose the answer.'
-          : 'No additional context used.',
+        message: contextMessage,
         context: result.context,
         queries: result.contextQueries,
         retrievedAt: result.contextRetrievedAt,
+        attachments: result.attachments,
+        warnings: result.attachmentWarnings,
       })
     );
-    if (hasContext ? !(state.settings?.openThoughtsByDefault ?? false) : false) {
+    assistantEntry.setTiming(formatTimingSummary(result.timing));
+
+    if (reasoningText) {
+      assistantEntry.openThoughts();
+    } else if (state.settings?.openThoughtsByDefault ?? false) {
+      assistantEntry.openThoughts();
+    } else if (!hasContext) {
+      assistantEntry.closeThoughts();
+    } else {
       assistantEntry.closeThoughts();
     }
 
@@ -690,12 +1487,22 @@ async function handlePromptSubmit() {
         queries: result.contextQueries,
         retrievedAt: result.contextRetrievedAt,
         links: result.userLinks,
+        reasoning: reasoningText,
+        usedWebSearch: result.usedWebSearch,
+        reusedConversationMemory: result.reusedConversationMemory,
+        assistantSearchRequests: result.assistantSearchRequests,
+        attachments: result.attachments,
+        attachmentWarnings: result.attachmentWarnings,
+        timing: result.timing,
+        supportsReasoning: result.supportsReasoning,
       },
       model
     );
     state.pendingAssistantByChat.delete(chatId);
     state.isStreaming = false;
     updateInteractivity();
+    stopAttachmentStatusTimer();
+    renderAttachmentList();
     await refreshChatList(chatId);
     updateChatTitle();
   } catch (err) {
@@ -710,6 +1517,12 @@ async function handlePromptSubmit() {
     state.activeRequestId = null;
     state.activeAssistantEntry = null;
     updateInteractivity();
+    stopAttachmentStatusTimer();
+    renderAttachmentList();
+    trackAnalyticsEvent('response_error', {
+      type: 'exception',
+      message: String(err?.message || err || 'Unknown error').slice(0, 120),
+    });
   }
 }
 
@@ -731,8 +1544,14 @@ async function handleNewChat() {
     updatedAt: chat.updatedAt,
   });
   renderChatList(chat.id);
+  stopAttachmentStatusTimer();
+  setCurrentChatAttachments(chat.attachments || [], { persist: false });
   renderChat(chat);
   promptInput.focus();
+  trackAnalyticsEvent('chat_created', {
+    chat_count: state.chats.length,
+    model: chat.model,
+  });
 }
 
 async function selectChat(chatId) {
@@ -752,6 +1571,8 @@ async function selectChat(chatId) {
   state.currentChatId = chat.id;
   state.currentChat = chat;
   renderChatList(chatId);
+  stopAttachmentStatusTimer();
+  setCurrentChatAttachments(chat.attachments || [], { persist: false });
   renderChat(chat);
 }
 
@@ -764,7 +1585,7 @@ function renderChat(chat) {
     empty.innerHTML = `
       <h2 class="empty-title">DioxideAi</h2>
       <p>Start a conversation by selecting a model and asking a question.</p>
-      <small>Your chats are saved locally and appear here.</small>
+      <small>Your chats are private and only stored on your device.</small>
     `;
     chatArea.appendChild(empty);
     return;
@@ -776,11 +1597,18 @@ function renderChat(chat) {
       appendUserMessage(message.content);
     } else {
       const usedWeb = Boolean(message.meta?.usedWebSearch);
-      appendAssistantMessage(message.content, {
-        open: false,
-        thoughts: formatStoredContext(message.meta),
-        summary: usedWeb ? 'Web Context' : 'Notes',
+      const storedThought = formatStoredContext(message.meta || {});
+      const entry = appendAssistantMessage(message.content, {
+        open: state.settings?.openThoughtsByDefault ?? false,
+        thoughts: storedThought.context,
+        summary: usedWeb ? 'Web Context' : 'Context',
       });
+      if (storedThought.reasoning) {
+        entry.setReasoning(storedThought.reasoning);
+      }
+      if (storedThought.timing) {
+        entry.setTiming(storedThought.timing);
+      }
     }
   });
 }
@@ -839,7 +1667,7 @@ function appendAssistantMessage(content, options = {}) {
   const {
     open = openDefault,
     thoughts = '',
-    summary = 'Notes',
+    summary = '',
     loading = false,
   } = options;
 
@@ -849,6 +1677,7 @@ function appendAssistantMessage(content, options = {}) {
   const text = document.createElement('div');
   text.classList.add('message-text');
   let loadingIndicator = null;
+  let loadingStatusLabel = null;
   let loadingActive = Boolean(loading);
   const actionBar = document.createElement('div');
   actionBar.classList.add('message-actions');
@@ -858,10 +1687,20 @@ function appendAssistantMessage(content, options = {}) {
     loadingIndicator = document.createElement('div');
     loadingIndicator.classList.add('message-loading');
     loadingIndicator.setAttribute('aria-hidden', 'true');
+    const dotsWrapper = document.createElement('div');
+    dotsWrapper.classList.add('message-loading-dots');
     for (let i = 0; i < 3; i += 1) {
       const dot = document.createElement('span');
-      loadingIndicator.appendChild(dot);
+      dotsWrapper.appendChild(dot);
     }
+    loadingIndicator.appendChild(dotsWrapper);
+    loadingStatusLabel = document.createElement('span');
+    loadingStatusLabel.classList.add('message-loading-status');
+    loadingStatusLabel.textContent =
+      typeof options.loadingStatus === 'string' && options.loadingStatus.trim()
+        ? options.loadingStatus.trim()
+        : 'Preparing response…';
+    loadingIndicator.appendChild(loadingStatusLabel);
     container.classList.add('loading');
     actionBar.appendChild(loadingIndicator);
   }
@@ -880,7 +1719,7 @@ function appendAssistantMessage(content, options = {}) {
 
   const thoughtsText = document.createElement('pre');
   thoughtsText.classList.add('thoughts-text');
-  thoughtsText.textContent = thoughts || 'No additional context used.';
+  thoughtsText.textContent = 'No additional context used.';
   details.appendChild(thoughtsText);
 
   container.appendChild(details);
@@ -888,11 +1727,63 @@ function appendAssistantMessage(content, options = {}) {
   chatArea.appendChild(container);
   chatArea.scrollTop = chatArea.scrollHeight;
 
+  const defaultSummary = '';
+  let manualSummary = summary && summary.trim() ? summary : '';
+  const thoughtState = {
+    context: typeof thoughts === 'string' ? thoughts.trim() : '',
+    reasoning: '',
+    timing: '',
+  };
+
+  const updateSummary = () => {
+    const hasContext = Boolean(thoughtState.context);
+    const hasReasoning = Boolean(thoughtState.reasoning);
+    const hasTiming = Boolean(thoughtState.timing);
+    let label = manualSummary || defaultSummary;
+
+    if (hasReasoning && hasContext && hasTiming) {
+      label = 'Reasoning, Context & Timing';
+    } else if (hasReasoning && hasContext) {
+      label = 'Reasoning & Context';
+    } else if (hasReasoning && hasTiming) {
+      label = 'Reasoning & Timing';
+    } else if (hasContext && hasTiming) {
+      label = 'Context & Timing';
+    } else if (hasReasoning) {
+      label = 'Reasoning';
+    } else if (hasContext && !manualSummary) {
+      label = 'Context';
+    } else if (hasTiming && !manualSummary) {
+      label = 'Timing';
+    }
+
+    summaryEl.textContent = label || '';
+  };
+
+  const updateThoughtText = () => {
+    const segments = [];
+    if (thoughtState.reasoning) {
+      segments.push(`Reasoning:\n${thoughtState.reasoning}`);
+    }
+    if (thoughtState.timing) {
+      segments.push(`Model timings: ${thoughtState.timing}`);
+    }
+    if (thoughtState.context) {
+      segments.push(thoughtState.context);
+    }
+    const combined = segments.join('\n\n').trim();
+    thoughtsText.textContent = combined || 'No additional context used.';
+  };
+
+  updateThoughtText();
+  updateSummary();
+
   const clearLoading = () => {
     if (loadingIndicator) {
       loadingIndicator.remove();
       loadingIndicator = null;
     }
+    loadingStatusLabel = null;
     container.classList.remove('loading');
     loadingActive = false;
     updateActionBarVisibility();
@@ -914,12 +1805,27 @@ function appendAssistantMessage(content, options = {}) {
       setMessageContent(text, value);
     },
     setSummary: (value) => {
-      summaryEl.textContent = value || 'Notes';
+      manualSummary = value && value.trim() ? value.trim() : '';
+      updateSummary();
     },
     setThought: (value) => {
-      thoughtsText.textContent = value?.trim()
-        ? value.trim()
-        : 'No additional context used.';
+      thoughtState.context = value?.trim() || '';
+      updateThoughtText();
+      updateSummary();
+    },
+    setTiming: (value) => {
+      thoughtState.timing = value?.trim() || '';
+      updateThoughtText();
+      updateSummary();
+    },
+    setReasoning: (value) => {
+      const trimmed = value?.trim() || '';
+      if (thoughtState.reasoning === trimmed) {
+        return;
+      }
+      thoughtState.reasoning = trimmed;
+      updateThoughtText();
+      updateSummary();
     },
     openThoughts: () => {
       details.open = true;
@@ -936,8 +1842,14 @@ function appendAssistantMessage(content, options = {}) {
       buttons.forEach((btn) => btn.remove());
       updateActionBarVisibility();
     },
+    setLoadingStatus: (value) => {
+      if (loadingStatusLabel && typeof value === 'string') {
+        loadingStatusLabel.textContent = value.trim() || 'Preparing response…';
+      }
+    },
     stopLoading: clearLoading,
     getContent: () => text.textContent || '',
+    getThoughtState: () => ({ ...thoughtState }),
   };
 }
 
@@ -971,18 +1883,50 @@ function recordAssistantMessage(content, contextData, model) {
   const contextText = contextData?.context || '';
   const contextQueries = contextData?.queries || [];
   const contextRetrievedAt = contextData?.retrievedAt || null;
+  const reasoningText = contextData?.reasoning || '';
+  const usedWebSearch =
+    contextData?.usedWebSearch !== undefined ? Boolean(contextData.usedWebSearch) : Boolean(contextText);
+
+  const meta = {
+    context: contextText,
+    contextQueries,
+    contextRetrievedAt,
+    usedWebSearch,
+    userLinks: contextData?.links || [],
+  };
+
+  if (contextData?.reusedConversationMemory !== undefined) {
+    meta.reusedConversationMemory = Boolean(contextData.reusedConversationMemory);
+  }
+
+  if (reasoningText) {
+    meta.reasoning = reasoningText;
+    meta.supportsReasoning = true;
+  } else if (contextData?.supportsReasoning !== undefined) {
+    meta.supportsReasoning = Boolean(contextData.supportsReasoning);
+  }
+
+  if (Number.isFinite(contextData?.assistantSearchRequests)) {
+    meta.assistantSearchRequests = contextData.assistantSearchRequests;
+  }
+
+  if (contextData?.timing) {
+    meta.timing = contextData.timing;
+  }
+
+  if (Array.isArray(contextData?.attachments) && contextData.attachments.length) {
+    meta.attachments = contextData.attachments;
+  }
+
+  if (Array.isArray(contextData?.attachmentWarnings) && contextData.attachmentWarnings.length) {
+    meta.attachmentWarnings = contextData.attachmentWarnings;
+  }
 
   state.currentChat.messages.push({
     role: 'assistant',
     content,
     createdAt: timestamp,
-    meta: {
-      context: contextText,
-      contextQueries,
-      contextRetrievedAt,
-      usedWebSearch: Boolean(contextText),
-      userLinks: contextData?.links || [],
-    },
+    meta,
   });
   state.currentChat.model = model;
   state.currentChat.updatedAt = timestamp;
@@ -1011,9 +1955,15 @@ function setModelControlsDisabled(disabled) {
 }
 
 function updateInteractivity() {
-  promptInput.disabled = state.isStreaming;
-  sendButton.disabled = state.isStreaming;
-  newChatButton.disabled = state.isStreaming;
+  if (sendButton) {
+    sendButton.disabled = state.isStreaming;
+  }
+  if (newChatButton) {
+    newChatButton.disabled = state.isStreaming;
+  }
+  if (attachButton) {
+    attachButton.disabled = state.isStreaming;
+  }
   if (sidebarToggleBtn) {
     sidebarToggleBtn.disabled = state.isStreaming;
   }
@@ -1091,20 +2041,27 @@ function formatSearchPlanThought({ message, queries }) {
   return lines.join('\n').trim() || 'Preparing web search queries.';
 }
 
-function formatContextThought({ message, context, queries, retrievedAt }) {
+function formatContextThought({ message, context, queries, retrievedAt, attachments, warnings }) {
   const lines = [];
+  const rawContext = typeof context === 'string' ? context : '';
   const hasEmbeddedQueries =
-    typeof context === 'string' && context.toLowerCase().includes('queries used:');
+    rawContext.toLowerCase().includes('queries used:');
   const hasEmbeddedTimestamp =
-    typeof context === 'string' && context.toLowerCase().includes('fresh context collected');
+    rawContext.toLowerCase().includes('fresh context collected');
+  let displayContext = rawContext;
+  const attachmentsMarker = 'Uploaded files provided by the user:';
+  const markerIndex = displayContext.indexOf(attachmentsMarker);
+  if (markerIndex !== -1) {
+    displayContext = displayContext.slice(0, markerIndex).trimEnd();
+  }
   if (message) {
     lines.push(message);
   }
   if (retrievedAt && !hasEmbeddedTimestamp) {
     lines.push(`Retrieved: ${formatTimestamp(retrievedAt)}`);
   }
-  if (context?.trim()) {
-    lines.push('', context.trim());
+  if (displayContext?.trim()) {
+    lines.push('', displayContext.trim());
   }
   if (queries?.length && !hasEmbeddedQueries) {
     lines.push('', 'Queries:');
@@ -1112,7 +2069,66 @@ function formatContextThought({ message, context, queries, retrievedAt }) {
       lines.push(`• ${query}`);
     });
   }
+  if (Array.isArray(attachments) && attachments.length) {
+    lines.push('', 'Uploaded files:');
+    attachments.forEach((file) => {
+      const sizeLabel = formatBytes(file.size || 0);
+      const suffix = file.truncated ? ' (truncated)' : '';
+      lines.push(`• ${file.name || 'attachment'} — ${sizeLabel}${suffix}`);
+    });
+  }
+  if (Array.isArray(warnings) && warnings.length) {
+    lines.push('', 'Notes:');
+    warnings.forEach((warning) => {
+      lines.push(`• ${warning}`);
+    });
+  }
   return lines.join('\n').trim() || 'No additional context used.';
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return null;
+  }
+  if (ms >= 1000) {
+    const seconds = ms / 1000;
+    const precision = seconds >= 10 ? 1 : 2;
+    return `${seconds.toFixed(precision)}s`;
+  }
+  return `${Math.round(ms)}ms`;
+}
+
+function formatTimingSummary(timing) {
+  if (!timing || typeof timing !== 'object') {
+    return '';
+  }
+
+  const load = formatDuration(timing.loadMs ?? timing.firstTokenMs);
+  const generation = formatDuration(timing.generationMs ?? timing.streamMs);
+  const total = formatDuration(timing.totalMs);
+  const tokens = Number.isFinite(timing.tokens) && timing.tokens > 0 ? `${timing.tokens} tokens` : '';
+  const rate = Number.isFinite(timing.tokensPerSecond) && timing.tokensPerSecond > 0
+    ? `${timing.tokensPerSecond} tok/s`
+    : '';
+
+  const parts = [];
+  if (load) {
+    parts.push(`Load ${load}`);
+  }
+  if (generation) {
+    parts.push(`Generation ${generation}`);
+  }
+  if (!generation && total) {
+    parts.push(`Total ${total}`);
+  }
+  if (tokens) {
+    parts.push(tokens);
+  }
+  if (rate) {
+    parts.push(rate);
+  }
+
+  return parts.join(' · ');
 }
 
 function formatStoredContext(meta = {}) {
@@ -1124,18 +2140,33 @@ function formatStoredContext(meta = {}) {
     context = ['User-provided links:', ...meta.userLinks.map((link) => `• ${link}`)].join('\n');
   }
 
-  return formatContextThought({
-    message: meta.usedWebSearch
-      ? 'Context used when drafting this reply.'
+  const message = meta.usedWebSearch
+    ? 'Context used when drafting this reply.'
+    : meta.reusedConversationMemory
+      ? 'Relied on earlier conversation and stored context.'
       : hasLinks
         ? 'User-provided links supplied by the user.'
         : hasQueries
           ? 'Web search disabled (saved candidate queries).'
-          : 'No additional context used.',
+          : 'No additional context used.';
+
+  const contextBlock = formatContextThought({
+    message,
     context,
     queries: meta.contextQueries,
     retrievedAt: meta.contextRetrievedAt,
+    attachments: meta.attachments,
+    warnings: meta.attachmentWarnings,
   });
+
+  const reasoning = typeof meta.reasoning === 'string' ? meta.reasoning.trim() : '';
+  const timing = formatTimingSummary(meta.timing);
+
+  return {
+    context: contextBlock,
+    reasoning,
+    timing,
+  };
 }
 
 function formatTimestamp(isoString) {
@@ -1249,39 +2280,22 @@ function pruneMarkdownWhitespace(root) {
 }
 
 function updateSidebarState(collapsed) {
-  document.body.classList.toggle('sidebar-collapsed', collapsed);
+  const next = Boolean(collapsed);
+  state.sidebarCollapsed = next;
+  document.body.classList.toggle('sidebar-collapsed', next);
   if (sidebarToggleBtn) {
-    sidebarToggleBtn.setAttribute('aria-pressed', String(Boolean(collapsed)));
-    sidebarToggleBtn.textContent = collapsed ? 'Show Chats' : 'Hide Chats';
+    sidebarToggleBtn.setAttribute('aria-pressed', String(next));
+    sidebarToggleBtn.textContent = next ? 'Show Chats' : 'Hide Chats';
+  }
+  if (sidebarCollapseToggle && sidebarCollapseToggle.checked !== next) {
+    sidebarCollapseToggle.checked = next;
   }
 }
 
 function applyTheme(themeSetting) {
-  const resolved = resolveTheme(themeSetting);
-  const themeClasses = ['theme-light', 'theme-dark', 'theme-cream'];
-  themeClasses.forEach((className) => {
-    const suffix = className.replace('theme-', '');
-    document.body.classList.toggle(className, resolved === suffix);
-  });
+  document.body.classList.remove('theme-light', 'theme-dark', 'theme-cream');
 }
 
 function resolveTheme(themeSetting) {
-  if (themeSetting === 'system') {
-    return prefersDark && prefersDark.matches ? 'dark' : 'light';
-  }
-  const allowed = ['light', 'dark', 'cream'];
-  return allowed.includes(themeSetting) ? themeSetting : 'light';
-}
-
-
-
-
-
-if (prefersDark) {
-  const systemThemeListener = () => applyTheme(state.settings?.theme || DEFAULT_SETTINGS.theme);
-  if (typeof prefersDark.addEventListener === 'function') {
-    prefersDark.addEventListener('change', systemThemeListener);
-  } else if (typeof prefersDark.addListener === 'function') {
-    prefersDark.addListener(systemThemeListener);
-  }
+  return 'light';
 }

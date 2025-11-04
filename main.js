@@ -4,6 +4,9 @@ const fs = require('fs');
 const { promises: fsPromises } = fs;
 const { randomUUID } = require('crypto');
 const fetch = require('node-fetch');
+const amplitude = require('@amplitude/analytics-node');
+const dns = require('dns');
+const dnsPromises = dns.promises;
 const cheerio = require('cheerio');
 const { marked } = require('marked');
 const { autoUpdater } = require('electron-updater');
@@ -28,6 +31,9 @@ const DEFAULT_SETTINGS = {
   theme: 'system',
   sidebarCollapsed: false,
   showTutorial: true,
+  shareAnalytics: true,
+  ollamaEndpoint: 'http://localhost:11434',
+  analyticsDeviceId: null,
 };
 
 const STORE_FILE = 'dioxideai-chats.json';
@@ -45,6 +51,255 @@ let settingsPath;
 const activeRequests = new Map();
 let mainWindow = null;
 let autoUpdateInitialized = false;
+let lastConnectivityCheck = 0;
+let lastConnectivityStatus = true;
+const ANALYTICS_CONFIG_FILENAME = 'config/analytics-key.json';
+let analyticsClient = null;
+let analyticsClientInitPromise = null;
+let analyticsOptOut = false;
+let analyticsDeviceId = null;
+let analyticsDeviceIdPromise = null;
+let analyticsApiKey = null;
+let analyticsApiKeyLoaded = false;
+
+function normalizeOllamaEndpoint(value) {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  const base = trimmed || DEFAULT_SETTINGS.ollamaEndpoint;
+  return base.replace(/\/+$/, '');
+}
+
+function resolveOllamaEndpoint() {
+  const effective = getEffectiveSettings();
+  return normalizeOllamaEndpoint(effective.ollamaEndpoint);
+}
+
+function buildOllamaUrl(pathname) {
+  const base = resolveOllamaEndpoint();
+  const cleanPath = pathname && pathname.startsWith('/') ? pathname : `/${pathname || ''}`;
+  return `${base}${cleanPath}`;
+}
+
+function getAnalyticsApiKey() {
+  if (!analyticsApiKeyLoaded) {
+    analyticsApiKey = resolveAnalyticsApiKey();
+    analyticsApiKeyLoaded = true;
+  }
+  return analyticsApiKey;
+}
+
+function resolveAnalyticsApiKey() {
+  if (process.env.AMPLITUDE_API_KEY && process.env.AMPLITUDE_API_KEY.trim()) {
+    return process.env.AMPLITUDE_API_KEY.trim();
+  }
+
+  const configPath = resolveAnalyticsConfigPath();
+
+  try {
+    const contents = fs.readFileSync(configPath, 'utf8');
+    let parsed = null;
+    try {
+      parsed = JSON.parse(contents);
+    } catch (parseErr) {
+      parsed = contents;
+    }
+
+    const candidate =
+      (parsed && typeof parsed === 'object' && parsed !== null
+        ? parsed.amplitudeApiKey || parsed.apiKey || parsed.key
+        : parsed) || '';
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') {
+      console.warn('Failed to read analytics API key file:', err.message || err);
+    }
+  }
+
+  return null;
+}
+
+function resolveAnalyticsConfigPath() {
+  const candidatePaths = [];
+
+  if (typeof app?.getAppPath === 'function') {
+    try {
+      candidatePaths.push(path.join(app.getAppPath(), ANALYTICS_CONFIG_FILENAME));
+    } catch (err) {
+      // Swallow; we'll fall back to other locations.
+    }
+  }
+
+  if (app?.isPackaged && process?.resourcesPath) {
+    candidatePaths.push(path.join(process.resourcesPath, 'app.asar', ANALYTICS_CONFIG_FILENAME));
+    candidatePaths.push(path.join(process.resourcesPath, ANALYTICS_CONFIG_FILENAME));
+  }
+
+  candidatePaths.push(path.join(__dirname, ANALYTICS_CONFIG_FILENAME));
+
+  for (const candidate of candidatePaths) {
+    try {
+      if (candidate && fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch (err) {
+      // Ignore access errors; continue to next candidate.
+    }
+  }
+
+  return candidatePaths[candidatePaths.length - 1];
+}
+
+async function ensureAnalyticsClient() {
+  if (analyticsOptOut) {
+    return null;
+  }
+
+  if (analyticsClient) {
+    if (analyticsClientInitPromise) {
+      try {
+        await analyticsClientInitPromise;
+      } catch (err) {
+        console.error('Analytics initialization previously failed:', err);
+        return null;
+      }
+    }
+    return analyticsClient;
+  }
+
+  const apiKey = getAnalyticsApiKey();
+  if (!apiKey) {
+    console.warn('Analytics API key not found. Usage analytics disabled.');
+    return null;
+  }
+
+  analyticsClient = amplitude.createInstance();
+  const initResult = analyticsClient.init(apiKey, {
+    serverZone: 'US',
+    flushIntervalMillis: 5000,
+  });
+
+  const initPromise =
+    initResult && typeof initResult === 'object' && typeof initResult.promise?.then === 'function'
+      ? initResult.promise
+      : Promise.resolve();
+
+  analyticsClientInitPromise = initPromise
+    .then(() => {
+      analyticsClientInitPromise = null;
+      if (analyticsClient?.setOptOut) {
+        analyticsClient.setOptOut(Boolean(analyticsOptOut));
+      }
+      return analyticsClient;
+    })
+    .catch((err) => {
+      analyticsClientInitPromise = null;
+      analyticsClient = null;
+      console.error('Failed to initialize analytics client:', err);
+      return null;
+    });
+
+  return analyticsClientInitPromise;
+}
+
+async function setAnalyticsOptOut(optOut) {
+  analyticsOptOut = Boolean(optOut);
+  if (analyticsOptOut) {
+    if (analyticsClient?.setOptOut) {
+      analyticsClient.setOptOut(true);
+    }
+    return { initialized: Boolean(analyticsClient), optedOut: true };
+  }
+
+  const client = await ensureAnalyticsClient();
+  if (client?.setOptOut) {
+    client.setOptOut(false);
+  }
+  return { initialized: Boolean(client), optedOut: analyticsOptOut || !client };
+}
+
+async function ensureAnalyticsDeviceId() {
+  if (analyticsDeviceId) {
+    return analyticsDeviceId;
+  }
+  if (analyticsDeviceIdPromise) {
+    return analyticsDeviceIdPromise;
+  }
+
+  analyticsDeviceIdPromise = (async () => {
+    try {
+      await ensureSettingsLoaded();
+    } catch (err) {
+      console.error('Failed to load settings for analytics device id:', err);
+    }
+
+    const existing =
+      settings &&
+      typeof settings.analyticsDeviceId === 'string' &&
+      settings.analyticsDeviceId.trim();
+
+    if (existing) {
+      analyticsDeviceId = existing.trim();
+      return analyticsDeviceId;
+    }
+
+    const generated = randomUUID();
+    const baseSettings = settings && typeof settings === 'object' ? settings : getDefaultSettings();
+    settings = applySettingsPatch(baseSettings, { analyticsDeviceId: generated });
+
+    try {
+      await persistSettings();
+    } catch (err) {
+      console.error('Failed to persist analytics device id:', err);
+    }
+
+    analyticsDeviceId = generated;
+    return analyticsDeviceId;
+  })();
+
+  try {
+    const resolved = await analyticsDeviceIdPromise;
+    analyticsDeviceIdPromise = null;
+    return resolved;
+  } catch (err) {
+    analyticsDeviceIdPromise = null;
+    throw err;
+  }
+}
+
+async function trackAnalyticsEventMain(name, props = {}) {
+  if (analyticsOptOut || !name) {
+    return false;
+  }
+  const client = await ensureAnalyticsClient();
+  if (!client || typeof client.track !== 'function') {
+    return false;
+  }
+  try {
+    let deviceId = 'dioxideai-desktop';
+    try {
+      const ensuredId = await ensureAnalyticsDeviceId();
+      if (ensuredId) {
+        deviceId = ensuredId;
+      }
+    } catch (deviceErr) {
+      console.error('Failed to resolve analytics device id:', deviceErr);
+    }
+
+    const result = client.track({
+      event_type: String(name),
+      event_properties: props || {},
+      device_id: deviceId,
+    });
+    if (result && typeof result === 'object' && typeof result.promise?.then === 'function') {
+      await result.promise;
+    }
+    return true;
+  } catch (err) {
+    console.error('Failed to track analytics event:', err);
+    return false;
+  }
+}
 
 const TOKEN_STOP_WORDS = new Set([
   'what',
@@ -132,6 +387,22 @@ const TOKEN_STOP_WORDS = new Set([
 
 const REFERENTIAL_FOLLOW_UP_STOP_WORDS = TOKEN_STOP_WORDS;
 
+const MAX_ATTACHMENTS_PER_PROMPT = 4;
+const MAX_ATTACHMENT_BYTES = 512 * 1024; // 512 KB per file
+const MAX_ATTACHMENT_TOTAL_BYTES = 1024 * 1024; // 1 MB per request
+const MAX_ATTACHMENT_CHARS = 4000;
+const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
+  '.txt',
+  '.md',
+  '.markdown',
+  '.json',
+  '.csv',
+  '.tsv',
+  '.log',
+  '.yaml',
+  '.yml',
+]);
+
 app.whenReady().then(async () => {
   await Promise.all([ensureSettingsLoaded(), ensureChatsLoaded()]);
   createWindow();
@@ -139,10 +410,10 @@ app.whenReady().then(async () => {
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1080,
-    height: 720,
-    minWidth: 900,
-    minHeight: 600,
+    width: 960,
+    height: 780,
+    minWidth: 860,
+    minHeight: 640,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -171,6 +442,16 @@ app.on('activate', () => {
   }
 });
 
+app.on('before-quit', () => {
+  if (analyticsClient?.flush) {
+    try {
+      analyticsClient.flush();
+    } catch (err) {
+      console.error('Failed to flush analytics events:', err);
+    }
+  }
+});
+
 ipcMain.handle('check-for-updates', async () => {
   if (!app.isPackaged) {
     return { skipped: true };
@@ -189,22 +470,22 @@ ipcMain.handle('check-for-updates', async () => {
 
 ipcMain.handle('get-settings', async () => {
   await ensureSettingsLoaded();
-  settings = sanitizeSettings(settings);
-  return settings;
+  return getRendererSafeSettings();
 });
 
 ipcMain.handle('update-settings', async (_event, partialSettings) => {
   await ensureSettingsLoaded();
   const base = settings || getDefaultSettings();
   const next = applySettingsPatch(base, partialSettings);
-  settings = sanitizeSettings(next);
+  settings = next;
   await persistSettings();
-  return sanitizeSettings(settings);
+  return getRendererSafeSettings();
 });
 
 ipcMain.handle('fetch-models', async () => {
   try {
-    const res = await fetch('http://localhost:11434/api/tags');
+    await ensureSettingsLoaded();
+    const res = await fetch(buildOllamaUrl('/api/tags'));
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -319,7 +600,224 @@ ipcMain.handle('delete-all-chats', async () => {
   return { success: true };
 });
 
-ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, userLinks = [] }) => {
+ipcMain.handle('analytics-init', async (_event, rawOptions = {}) => {
+  const apiKey = getAnalyticsApiKey();
+  if (!apiKey) {
+    analyticsClient = null;
+    analyticsOptOut = true;
+    return { initialized: false, optedOut: true };
+  }
+  const optOut = Boolean(rawOptions?.optOut);
+  return setAnalyticsOptOut(optOut);
+});
+
+ipcMain.handle('analytics-set-opt-out', async (_event, optOut) => setAnalyticsOptOut(optOut));
+
+ipcMain.handle('analytics-track', async (_event, payload = {}) => {
+  if (!payload || typeof payload !== 'object') {
+    return { queued: false };
+  }
+  const name = payload.name;
+  const props = payload.props || {};
+  const queued = await trackAnalyticsEventMain(name, props);
+  return { queued };
+});
+
+ipcMain.handle('set-chat-attachments', async (_event, { chatId, attachments = [] }) => {
+  await ensureChatsLoaded();
+
+  if (!chatId) {
+    return { success: false, error: 'Chat id is required.' };
+  }
+
+  const chat = chatsCache.find((item) => item.id === chatId);
+  if (!chat) {
+    return { success: false, error: 'Chat not found.' };
+  }
+
+  const sanitized = sanitizeStoredAttachments(attachments);
+  chat.attachments = sanitized;
+
+  try {
+    await persistChats();
+  } catch (err) {
+    console.error('Failed to persist chat attachments:', err);
+    return { success: false, error: err?.message || 'Unable to save attachments.' };
+  }
+
+  return { success: true, attachments: sanitized.map((item) => ({ ...item })) };
+});
+
+ipcMain.handle('pick-local-files', async (_event, rawOptions = {}) => {
+  const options = typeof rawOptions === 'object' && rawOptions !== null ? rawOptions : {};
+  const existingCount = Number.isFinite(options.existingCount) ? Number(options.existingCount) : 0;
+  const existingBytes = Number.isFinite(options.existingBytes) ? Number(options.existingBytes) : 0;
+  const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_PROMPT - existingCount);
+  const droppedPaths = Array.isArray(options.droppedPaths)
+    ? Array.from(
+        new Set(
+          options.droppedPaths
+            .map((value) => {
+              if (typeof value === 'string' && value.trim()) {
+                return value.trim();
+              }
+              return '';
+            })
+            .filter(Boolean)
+        )
+      )
+    : [];
+
+  const limits = {
+    maxFiles: MAX_ATTACHMENTS_PER_PROMPT,
+    maxPerFileBytes: MAX_ATTACHMENT_BYTES,
+    maxTotalBytes: MAX_ATTACHMENT_TOTAL_BYTES,
+  };
+
+  if (remainingSlots <= 0) {
+    return {
+      files: [],
+      rejected: [
+        {
+          reason: `Only ${MAX_ATTACHMENTS_PER_PROMPT} files are allowed per prompt. Remove an attachment before adding more.`,
+        },
+      ],
+      limits,
+    };
+  }
+
+  const browserWindow = BrowserWindow.getFocusedWindow() || mainWindow || null;
+  const dialogOptions = {
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      {
+        name: 'Text files',
+        extensions: Array.from(SUPPORTED_ATTACHMENT_EXTENSIONS).map((ext) => ext.slice(1)),
+      },
+    ],
+  };
+
+  const accepted = [];
+  const rejected = [];
+  let runningBytes = Math.max(0, existingBytes);
+  let candidatePaths = [];
+
+  if (droppedPaths.length) {
+    candidatePaths = droppedPaths.slice(0, remainingSlots);
+    if (droppedPaths.length > remainingSlots) {
+      droppedPaths.slice(remainingSlots).forEach((filePath) => {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: `Only ${MAX_ATTACHMENTS_PER_PROMPT} files are allowed per prompt. Remove an attachment before adding more.`,
+        });
+      });
+    }
+  } else {
+    const { canceled, filePaths } = await dialog.showOpenDialog(browserWindow, dialogOptions);
+    if (canceled || !filePaths || !filePaths.length) {
+      return { canceled: true, files: [], rejected, limits };
+    }
+    candidatePaths = filePaths.slice(0, remainingSlots);
+  }
+
+  for (const filePath of candidatePaths) {
+    try {
+      const stats = await fsPromises.stat(filePath);
+      if (!stats.isFile()) {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: 'Only regular files can be attached.',
+        });
+        continue;
+      }
+
+      const originalSize = stats.size;
+      if (originalSize === 0) {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: 'File is empty.',
+        });
+        continue;
+      }
+
+      if (originalSize > MAX_ATTACHMENT_BYTES) {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: `File is larger than ${formatBytes(MAX_ATTACHMENT_BYTES)}.`,
+        });
+        continue;
+      }
+
+      const ext = path.extname(filePath).toLowerCase();
+      if (!SUPPORTED_ATTACHMENT_EXTENSIONS.has(ext)) {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: 'Unsupported file type. Only plain text formats are allowed.',
+        });
+        continue;
+      }
+
+      let content;
+      try {
+        content = await fsPromises.readFile(filePath, 'utf8');
+      } catch (err) {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: 'Unable to read the file as UTF-8 text.',
+        });
+        continue;
+      }
+
+      if (isLikelyBinary(content)) {
+        rejected.push({
+          name: path.basename(filePath),
+          reason: 'File appears to be binary. Please convert it to plain text first.',
+        });
+        continue;
+      }
+
+      let sanitizedContent = truncateContentToBytes(content, MAX_ATTACHMENT_BYTES);
+      let sanitizedBytes = Buffer.byteLength(sanitizedContent, 'utf8');
+      let truncated = sanitizedContent.length < content.length;
+
+      if (runningBytes + sanitizedBytes > MAX_ATTACHMENT_TOTAL_BYTES) {
+        const remainingBytes = MAX_ATTACHMENT_TOTAL_BYTES - runningBytes;
+        if (remainingBytes <= 0) {
+          rejected.push({
+            name: path.basename(filePath),
+            reason: `Total attachment size would exceed ${formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)}.`,
+          });
+          continue;
+        }
+
+        sanitizedContent = truncateContentToBytes(sanitizedContent, remainingBytes);
+        sanitizedBytes = Buffer.byteLength(sanitizedContent, 'utf8');
+        truncated = true;
+      }
+
+      runningBytes += sanitizedBytes;
+
+      accepted.push({
+        id: randomUUID(),
+        name: path.basename(filePath),
+        size: originalSize,
+        bytes: sanitizedBytes,
+        displaySize: formatBytes(originalSize),
+        truncated,
+        content: sanitizedContent,
+      });
+    } catch (err) {
+      rejected.push({
+        name: path.basename(filePath),
+        reason: err?.message || 'Unable to process file.',
+      });
+    }
+  }
+
+  return { files: accepted, rejected, limits };
+});
+
+ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, userLinks = [], attachments = [] }) => {
   if (!prompt?.trim()) {
     return { chatId, error: 'Prompt is empty' };
   }
@@ -351,22 +849,77 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
 
   const now = new Date().toISOString();
   const historyMessages = chat.messages.map(({ role, content }) => ({ role, content }));
+  const initialGoal = chat.initialUserPrompt ? String(chat.initialUserPrompt).trim() : '';
+  const assistantTurns = countAssistantTurns(chat);
+  const webContextTurns = countWebContextTurns(chat);
+  const shouldLimitWebContext = assistantTurns >= 2;
+  const goalAligned = isPromptAlignedWithGoal(initialGoal, prompt);
 
   const effectiveSettings = getEffectiveSettings();
+  const conversationAnalysis = analyzeConversationGrounding(chat, prompt);
   const searchPrompt = buildSearchPrompt(chat, prompt);
   const focusTerms = deriveFollowUpFocus(chat, prompt);
-  const initialGoal = chat.initialUserPrompt ? String(chat.initialUserPrompt).trim() : '';
+  const baseHasRecentContext = hasRecentWebContext(chat);
+  const ollamaBaseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
+  const buildOllamaApiUrl = (suffix) => {
+    const cleanPath = suffix && suffix.startsWith('/') ? suffix : `/${suffix || ''}`;
+    return `${ollamaBaseUrl}${cleanPath}`;
+  };
   const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt, {
-    hasRecentContext: hasRecentWebContext(chat),
+    hasRecentContext: baseHasRecentContext,
     focusTerms,
     initialGoal,
+    conversationConfidence: conversationAnalysis.confidence,
+    conversationCoverage: conversationAnalysis.coverageRatio,
+    missingTerms: conversationAnalysis.missingTerms,
+    promptTokenCount: conversationAnalysis.promptTokens.length,
+    longRunning: conversationAnalysis.longRunning,
+    assistantTurns,
+    webContextTurns,
+    goalAligned,
   });
-  let contextResult = { text: '', entries: [], queries: [], retrievedAt: null };
+
+  if (!searchPlan.disabled) {
+    if (!Array.isArray(searchPlan.queries) || !searchPlan.queries.length) {
+      const fallbackQuery = searchPrompt || prompt;
+      if (fallbackQuery && fallbackQuery.trim()) {
+        searchPlan.queries = [fallbackQuery.trim()];
+      }
+    }
+    searchPlan.shouldSearch = true;
+    if (!searchPlan.message) {
+      searchPlan.message = 'Gathering fresh web context for this request.';
+    }
+  }
+
+  const conversationFirst =
+    !searchPlan.shouldSearch && !searchPlan.disabled && conversationAnalysis.confidence >= 0.65;
+
+  let contextResult = { text: '', entries: [], queries: [], retrievedAt: null, userLinks: [] };
   let contextMessage = '';
   let contextQueries = [];
   let userLinksForContext = [...normalizedUserLinks];
+  const attachmentsResult = sanitizeAttachmentsPayload(attachments);
+  const uploadedFiles = attachmentsResult.entries;
+  let attachmentsBlock = attachmentsResult.block;
+  const tRequestStart = Date.now();
+  let tFirstToken = null;
+  let tStreamEnd = null;
+  let totalChars = 0;
+  let totalTokens = 0;
 
-  if (searchPlan.shouldSearch && searchPlan.queries.length) {
+  let allowSearch = !searchPlan.disabled && searchPlan.queries.length > 0 && goalAligned;
+  let skippedForOffline = false;
+
+  if (allowSearch) {
+    const online = await hasNetworkConnectivity();
+    if (!online) {
+      allowSearch = false;
+      skippedForOffline = true;
+    }
+  }
+
+  if (allowSearch) {
     event.sender.send('ollama-thinking', {
       chatId,
       stage: 'search-plan',
@@ -376,87 +929,281 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
 
     contextResult = await performWebSearch(searchPlan.queries, {
       limit: effectiveSettings.searchResultLimit,
+      timeoutMs: 6500,
+      pageTimeoutMs: 5000,
     });
 
     if (contextResult.entries.length) {
-      contextMessage = normalizedUserLinks.length
-        ? 'Context gathered from the web along with user-provided links.'
-        : 'Context gathered from the web.';
+      if (shouldLimitWebContext) {
+        contextMessage = normalizedUserLinks.length
+          ? 'Selective refresh of web context plus user-provided links to refine the original goal.'
+          : 'Selective refresh of web context to refine the original goal.';
+      } else {
+        contextMessage = normalizedUserLinks.length
+          ? 'Context gathered from the web along with user-provided links.'
+          : 'Context gathered from the web.';
+      }
     } else if (normalizedUserLinks.length) {
       contextMessage = 'No relevant web results found. Using user-provided links.';
     } else {
       contextMessage = 'No relevant web results found.';
     }
     contextQueries = contextResult.queries;
-
   } else {
-    contextMessage = normalizedUserLinks.length
-      ? 'Using user-provided links.'
-      : searchPlan.disabled
-        ? searchPlan.message || 'Web search disabled in settings.'
-        : 'Responding with model knowledge (no web search).';
+    if (!goalAligned) {
+      contextMessage =
+        'Staying focused on the original objective from the first user request. Invite the user to start a new chat for unrelated tasks.';
+    } else if (skippedForOffline) {
+      contextMessage = normalizedUserLinks.length
+        ? 'No network connection detected. Using user-provided links.'
+        : 'No network connection detected. Responding with model knowledge.';
+    } else if (normalizedUserLinks.length) {
+      contextMessage = 'Using user-provided links.';
+    } else if (searchPlan.disabled) {
+      contextMessage = searchPlan.message || 'Web search disabled in settings.';
+    } else if (conversationFirst) {
+      contextMessage = 'Relying on conversation memory from earlier responses.';
+    } else if (shouldLimitWebContext && baseHasRecentContext) {
+      contextMessage = 'Reusing earlier web findings instead of refreshing search results.';
+    } else {
+      contextMessage = 'Responding with model knowledge (no web search).';
+    }
     contextQueries = [];
     userLinksForContext = normalizedUserLinks;
+    contextResult.queries = [];
+    contextResult.retrievedAt = null;
   }
 
   const contextSections = [];
-  if (contextResult.text && contextResult.text.trim()) {
-    contextSections.push(contextResult.text.trim());
+  if (initialGoal) {
+    const goalLines = ['Primary goal:', initialGoal];
+    if (!goalAligned) {
+      goalLines.push(
+        '',
+        'Reminder: The latest request may be unrelated. Reconfirm this goal before assisting with other tasks.'
+      );
+    }
+    contextSections.push(goalLines.join('\n'));
   }
+
+  let preparedContextText = '';
+  if (contextResult.text && contextResult.text.trim()) {
+    preparedContextText = shouldLimitWebContext
+      ? limitContextForFollowUp(contextResult.text)
+      : contextResult.text.trim();
+    if (preparedContextText) {
+      contextSections.push(preparedContextText);
+    }
+    if (
+      shouldLimitWebContext &&
+      Array.isArray(contextResult.entries) &&
+      contextResult.entries.length > 2
+    ) {
+      contextResult.entries = contextResult.entries.slice(0, 2);
+    }
+    if (shouldLimitWebContext && Array.isArray(contextResult.queries) && contextResult.queries.length > 2) {
+      contextResult.queries = contextResult.queries.slice(0, 2);
+      contextQueries = contextResult.queries;
+    }
+  }
+
   if (userLinksForContext.length) {
     const linksBlock = ['User-provided links:', ...userLinksForContext.map((link) => `• ${link}`)].join('\n');
     contextSections.push(linksBlock);
   }
 
+  if (attachmentsBlock && attachmentsBlock.trim()) {
+    contextSections.push(attachmentsBlock.trim());
+  }
+
   const finalContext = contextSections.join('\n\n').trim();
   contextResult.text = finalContext;
   contextResult.userLinks = userLinksForContext;
+  contextResult.attachments = attachmentsResult.summary;
 
   if (!contextMessage) {
-    contextMessage = userLinksForContext.length
-      ? 'Using user-provided links.'
-      : 'Responding with model knowledge (no web search).';
+    if (!goalAligned) {
+      contextMessage = 'Keeping the conversation focused on the original goal from the first message.';
+    } else if (shouldLimitWebContext && baseHasRecentContext) {
+      contextMessage = 'Reusing earlier web findings to stay on task.';
+    } else if (userLinksForContext.length) {
+      contextMessage = 'Using user-provided links.';
+    } else if (conversationFirst) {
+      contextMessage = 'Relying on conversation memory from earlier responses.';
+    } else {
+      contextMessage = 'Responding with model knowledge (no web search).';
+    }
+  }
+
+  if (uploadedFiles.length) {
+    const lowercaseMessage = contextMessage.toLowerCase();
+    if (lowercaseMessage.includes('no network')) {
+      contextMessage = `${contextMessage} Uploaded files will be included.`;
+    } else if (
+      contextMessage.includes('web') &&
+      (lowercaseMessage.includes('context gathered') || lowercaseMessage.includes('web context'))
+    ) {
+      contextMessage = 'Context gathered from the web and uploaded files.';
+    } else if (lowercaseMessage.includes('links')) {
+      contextMessage = 'Using user-provided links and uploaded files.';
+    } else {
+      contextMessage = 'Using uploaded files provided by the user.';
+    }
   }
 
   event.sender.send('ollama-thinking', {
     chatId,
     stage: 'context',
     message: contextMessage,
-    context: finalContext,
+    context: contextResult.text,
     queries: contextQueries,
     userLinks: userLinksForContext,
     retrievedAt: contextResult.retrievedAt,
+    attachments: contextResult.attachments,
+    attachmentWarnings: attachmentsResult.warnings,
+    goalAligned,
+    primaryGoal: initialGoal || undefined,
+    limitedWebContext: shouldLimitWebContext,
   });
 
-  const messagesForModel = [
-    { role: 'system', content: buildBaseSystemPrompt() },
-    ...historyMessages,
-  ];
-
+  const baseSystemMessages = [{ role: 'system', content: buildBaseSystemPrompt() }];
   if (initialGoal) {
-    messagesForModel.splice(1, 0, {
+    baseSystemMessages.push({
       role: 'system',
       content: buildGoalInstruction(initialGoal, prompt),
     });
-  }
-
-  if (contextResult.text) {
-    messagesForModel.push({
+    baseSystemMessages.push({
       role: 'system',
-      content: buildContextInstruction({
-        context: contextResult.text,
-        retrievedAt: contextResult.retrievedAt,
-        genericFresh: searchPlan.genericFresh,
-      }),
+      content: buildGoalGuardrailInstruction(initialGoal),
     });
+    if (!goalAligned) {
+      baseSystemMessages.push({
+        role: 'system',
+        content:
+          'The latest user message appears to deviate from the primary goal. Before helping, remind them of the original objective and suggest starting a new chat for other work.',
+      });
+    }
   }
 
-  messagesForModel.push({ role: 'user', content: prompt });
+  const contextSystemMessages = [];
+  const refreshContextSystemMessages = () => {
+    contextSystemMessages.length = 0;
+    if (contextResult.text) {
+      contextSystemMessages.push({
+        role: 'system',
+        content: buildContextInstruction({
+          context: contextResult.text,
+          retrievedAt: contextResult.retrievedAt,
+          genericFresh: searchPlan.genericFresh,
+        }),
+      });
+    }
+  };
+  refreshContextSystemMessages();
 
+  const buildMessagesForModel = () => [
+    ...baseSystemMessages,
+    ...historyMessages,
+    ...contextSystemMessages,
+    { role: 'user', content: prompt },
+  ];
+
+  const maxSearchRetries = 2;
+  let searchRetries = 0;
   let assistantContent = '';
+  let manualResponse = '';
+  let reasoningTranscript = '';
+  let reasoningSnapshot = '';
+  let reasoningDetected = false;
+  let timingInfo = null;
+  let generationStageAnnounced = false;
+  let modelStageAnnounced = false;
 
-  try {
-    const response = await fetch('http://localhost:11434/api/chat', {
+  const announceModelLoadingStage = () => {
+    modelStageAnnounced = true;
+    const loadingMessage =
+      model && String(model).trim() ? `Loading ${model}…` : 'Loading model…';
+    event.sender.send('ollama-thinking', {
+      chatId,
+      stage: 'model-loading',
+      message: loadingMessage,
+    });
+  };
+
+  const announceGenerationStage = (overrideMessage) => {
+    if (generationStageAnnounced) {
+      return;
+    }
+    generationStageAnnounced = true;
+    event.sender.send('ollama-thinking', {
+      chatId,
+      stage: 'generating',
+      message: overrideMessage || 'Generating response…',
+    });
+  };
+
+  const noteFirstToken = (timestamp) => {
+    if (!tFirstToken) {
+      if (Number.isFinite(timestamp)) {
+        tFirstToken = timestamp;
+      } else {
+        tFirstToken = Date.now();
+      }
+      announceGenerationStage();
+    }
+  };
+
+  const registerReasoningDelta = (payload) => {
+    const flattened = flattenReasoningPayload(payload);
+    if (!flattened) {
+      return '';
+    }
+
+    const normalized = typeof flattened === 'string' ? flattened : String(flattened);
+    const trimmedNormalized = normalized.trim();
+    if (!trimmedNormalized) {
+      return '';
+    }
+
+    reasoningDetected = true;
+
+    let candidate = trimmedNormalized;
+    if (reasoningSnapshot && trimmedNormalized.startsWith(reasoningSnapshot)) {
+      candidate = trimmedNormalized.slice(reasoningSnapshot.length);
+    } else if (reasoningSnapshot) {
+      const priorIndex = trimmedNormalized.indexOf(reasoningSnapshot);
+      if (priorIndex !== -1) {
+        candidate = trimmedNormalized.slice(priorIndex + reasoningSnapshot.length);
+      }
+    }
+
+    reasoningSnapshot = trimmedNormalized;
+
+    let delta = candidate.trimStart();
+    if (!delta) {
+      return '';
+    }
+
+    if (reasoningTranscript.endsWith(delta)) {
+      return '';
+    }
+
+    const needsSeparator =
+      reasoningTranscript && !reasoningTranscript.endsWith('\n') && !delta.startsWith('\n');
+
+    reasoningTranscript += needsSeparator ? `\n${delta}` : delta;
+    return delta;
+  };
+
+  const streamOnce = async (currentController) => {
+    const messagesForModel = buildMessagesForModel();
+    let assistantContentLocal = '';
+    let directiveBuffer = '';
+    let checkingDirective = true;
+    let searchDirectiveQuery = null;
+    let abortedForDirective = false;
+
+    const response = await fetch(buildOllamaApiUrl('/api/chat'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -464,7 +1211,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
         messages: messagesForModel,
         stream: true,
       }),
-      signal: controller.signal,
+      signal: currentController.signal,
     });
 
     if (!response.ok) {
@@ -473,6 +1220,114 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
 
     let buffer = '';
     const stream = response.body;
+    const emitUpdate = ({ delta = '', done = false, force = false }) => {
+      if (!force && !delta && !done && !reasoningDetected) {
+        return;
+      }
+      event.sender.send('ollama-stream', {
+        chatId,
+        delta,
+        full: assistantContentLocal,
+        done,
+        reasoning: reasoningTranscript || undefined,
+      });
+    };
+
+    const flushDirectiveBuffer = () => {
+      if (!directiveBuffer) {
+        return;
+      }
+      assistantContentLocal += directiveBuffer;
+      noteFirstToken();
+      if (directiveBuffer) {
+        totalChars += directiveBuffer.length;
+        totalTokens += estimateTokenCount(directiveBuffer);
+      }
+      event.sender.send('ollama-stream', {
+        chatId,
+        delta: directiveBuffer,
+        full: assistantContentLocal,
+        done: false,
+      });
+      directiveBuffer = '';
+    };
+
+    const processParsed = (parsed) => {
+      const reasoningPayload = parsed?.message?.reasoning ?? parsed?.reasoning ?? null;
+      const reasoningDelta = registerReasoningDelta(reasoningPayload);
+
+      if (parsed?.message?.content) {
+        let chunkText = parsed.message.content;
+        if (checkingDirective) {
+          directiveBuffer += chunkText;
+          const trimmed = directiveBuffer.trim();
+          const directiveCandidate = trimmed.includes(']]') ? extractSearchDirective(trimmed) : null;
+
+          if (directiveCandidate) {
+            searchDirectiveQuery = directiveCandidate;
+            abortedForDirective = true;
+            currentController.abort();
+            return;
+          }
+
+          const firstChar = trimmed.charAt(0);
+          if ((firstChar && firstChar !== '[') || trimmed.includes(']]')) {
+            checkingDirective = false;
+            flushDirectiveBuffer();
+          }
+          return;
+        }
+        const directivePattern = /\[\[search:\s*([\s\S]+?)\s*\]\]/i;
+        const directiveMatch = chunkText.match(directivePattern);
+
+        if (directiveMatch) {
+          const fullDirective = directiveMatch[0];
+          const directiveIndex = chunkText.indexOf(fullDirective);
+          const beforeDirective = chunkText.slice(0, directiveIndex);
+          const afterDirective = chunkText.slice(directiveIndex + fullDirective.length);
+
+          if (beforeDirective) {
+            assistantContentLocal += beforeDirective;
+            noteFirstToken();
+            totalChars += beforeDirective.length;
+            totalTokens += estimateTokenCount(beforeDirective);
+            emitUpdate({ delta: beforeDirective, done: false, force: true });
+          }
+
+          if (afterDirective.trim()) {
+            assistantContentLocal += afterDirective;
+            noteFirstToken();
+            totalChars += afterDirective.length;
+            totalTokens += estimateTokenCount(afterDirective);
+            emitUpdate({ delta: afterDirective, done: false, force: true });
+          }
+
+          const trimmedQuery = directiveMatch[1]?.trim();
+          if (trimmedQuery) {
+            searchDirectiveQuery = trimmedQuery;
+            abortedForDirective = true;
+            currentController.abort();
+            return;
+          }
+        } else {
+          assistantContentLocal += chunkText;
+          noteFirstToken();
+          if (chunkText) {
+            totalChars += chunkText.length;
+            totalTokens += estimateTokenCount(chunkText);
+          }
+          emitUpdate({ delta: chunkText, done: false, force: true });
+        }
+      } else if (reasoningDelta) {
+        emitUpdate({ delta: '', done: false, force: true });
+      }
+
+    if (parsed?.done) {
+      flushDirectiveBuffer();
+      tStreamEnd = Date.now();
+      emitUpdate({ delta: '', done: true, force: true });
+    }
+  };
 
     const processLine = (line) => {
       if (!line.trim()) {
@@ -480,44 +1335,157 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
       }
       try {
         const parsed = JSON.parse(line);
-
-        if (parsed?.message?.content) {
-          assistantContent += parsed.message.content;
-          event.sender.send('ollama-stream', {
-            chatId,
-            delta: parsed.message.content,
-            full: assistantContent,
-            done: false,
-          });
-        }
-
-        if (parsed?.done) {
-          event.sender.send('ollama-stream', {
-            chatId,
-            delta: '',
-            full: assistantContent,
-            done: true,
-          });
-        }
+        processParsed(parsed);
       } catch (err) {
         console.error('Failed to parse stream chunk:', err);
       }
     };
 
-    for await (const chunk of stream) {
-      buffer += chunk.toString();
-      let newlineIndex = buffer.indexOf('\n');
+    try {
+      for await (const chunk of stream) {
+        buffer += chunk.toString();
+        let newlineIndex = buffer.indexOf('\n');
 
-      while (newlineIndex !== -1) {
-        const line = buffer.slice(0, newlineIndex);
-        buffer = buffer.slice(newlineIndex + 1);
-        processLine(line);
-        newlineIndex = buffer.indexOf('\n');
+        while (newlineIndex !== -1) {
+          const line = buffer.slice(0, newlineIndex);
+          buffer = buffer.slice(newlineIndex + 1);
+          processLine(line);
+          if (searchDirectiveQuery) {
+            break;
+          }
+          newlineIndex = buffer.indexOf('\n');
+        }
+
+        if (searchDirectiveQuery) {
+          break;
+        }
       }
+    } catch (err) {
+      if (abortedForDirective && err.name === 'AbortError') {
+        return { type: 'directive', query: searchDirectiveQuery };
+      }
+      throw err;
     }
 
-    if (buffer.trim()) {
+    if (!searchDirectiveQuery && buffer.trim()) {
       processLine(buffer);
+    }
+
+    if (searchDirectiveQuery) {
+      return { type: 'directive', query: searchDirectiveQuery };
+    }
+
+    if (checkingDirective && directiveBuffer) {
+      checkingDirective = false;
+      flushDirectiveBuffer();
+    }
+
+    if (!tStreamEnd) {
+      tStreamEnd = Date.now();
+    }
+
+    return { type: 'content', content: assistantContentLocal };
+  };
+
+  try {
+    while (true) {
+      if (!modelStageAnnounced) {
+        announceModelLoadingStage();
+      }
+      const result = await streamOnce(controller);
+      if (result.type === 'directive') {
+        const query = result.query?.trim();
+        if (!query) {
+          manualResponse = 'I was unable to determine the search terms needed. Please provide more detail.';
+          assistantContent = manualResponse;
+          break;
+        }
+
+        if (searchRetries >= maxSearchRetries) {
+          manualResponse =
+            'I tried to fetch additional web context but reached the search limit. Please share any references you have.';
+          assistantContent = manualResponse;
+          break;
+        }
+
+        searchRetries += 1;
+
+        const truncatedQuery = truncateForSearch(query, 140);
+        event.sender.send('ollama-thinking', {
+          chatId,
+          stage: 'search-plan',
+          message: `Assistant requested web search for "${truncatedQuery}".`,
+          queries: [query],
+        });
+
+        const assistantHasNetwork = await hasNetworkConnectivity();
+        if (!assistantHasNetwork) {
+          const offlineMessage = 'Assistant requested web context, but no network connection is available.';
+          contextMessage = offlineMessage;
+          event.sender.send('ollama-thinking', {
+            chatId,
+            stage: 'context',
+            message: offlineMessage,
+            context: contextResult.text,
+            queries: contextResult.queries,
+            userLinks: userLinksForContext,
+            retrievedAt: contextResult.retrievedAt,
+          });
+
+          controller = new AbortController();
+          if (requestId) {
+            activeRequests.set(requestId, controller);
+          }
+          modelStageAnnounced = false;
+          generationStageAnnounced = false;
+          continue;
+        }
+
+        const supplemental = await performWebSearch([query], {
+          limit: effectiveSettings.searchResultLimit,
+          timeoutMs: 6500,
+          pageTimeoutMs: 5000,
+        });
+
+        const supplementalText = supplemental.entries.length
+          ? formatSearchEntries(supplemental.entries, supplemental.retrievedAt, supplemental.queries)
+          : '';
+
+        contextResult.entries = [...(contextResult.entries || []), ...supplemental.entries];
+        contextResult.queries = Array.from(new Set([...(contextResult.queries || []), ...supplemental.queries]));
+        contextResult.retrievedAt = supplemental.retrievedAt || contextResult.retrievedAt;
+
+        const descriptor = supplementalText
+          ? `Assistant-requested search for "${query}".\n${supplementalText}`
+          : `Assistant-requested search for "${query}".\nNo relevant web results found.`;
+
+        contextResult.text = appendContextSection(contextResult.text, descriptor);
+        refreshContextSystemMessages();
+        contextMessage = supplemental.entries.length
+          ? 'Assistant requested supplemental web context.'
+          : 'Assistant requested web context, but nothing relevant was found.';
+
+        event.sender.send('ollama-thinking', {
+          chatId,
+          stage: 'context',
+          message: contextMessage,
+          context: contextResult.text,
+          queries: contextResult.queries,
+          userLinks: userLinksForContext,
+          retrievedAt: contextResult.retrievedAt,
+        });
+
+        controller = new AbortController();
+        if (requestId) {
+          activeRequests.set(requestId, controller);
+        }
+        modelStageAnnounced = false;
+        generationStageAnnounced = false;
+        continue;
+      }
+
+      assistantContent = result.content;
+      break;
     }
   } catch (err) {
     if (requestId) {
@@ -542,19 +1510,83 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     return { chatId, error: 'Error: Unable to get response' };
   }
 
+  if (!tStreamEnd) {
+    tStreamEnd = Date.now();
+  }
+
+  if (!generationStageAnnounced) {
+    announceGenerationStage();
+  }
+
+  if (assistantContent && assistantContent.trim()) {
+    noteFirstToken(tStreamEnd);
+  }
+  if (totalTokens === 0 && assistantContent && assistantContent.trim()) {
+    totalTokens = estimateTokenCount(assistantContent);
+  }
+  if (totalChars === 0 && assistantContent) {
+    totalChars = assistantContent.length;
+  }
+
+  const totalMs = Math.max(0, tStreamEnd - tRequestStart);
+  const loadMs = tFirstToken ? Math.max(0, tFirstToken - tRequestStart) : totalMs;
+  const generationMs = tFirstToken ? Math.max(0, tStreamEnd - tFirstToken) : 0;
+  const tokensPerSecond = generationMs > 0 && totalTokens > 0
+    ? Number((totalTokens / (generationMs / 1000)).toFixed(2))
+    : null;
+
+  timingInfo = {
+    startedAt: new Date(tRequestStart).toISOString(),
+    completedAt: new Date(tStreamEnd).toISOString(),
+    totalMs,
+    loadMs,
+    generationMs,
+    firstTokenMs: loadMs,
+    streamMs: generationMs,
+    tokens: totalTokens,
+    chars: totalChars,
+    tokensPerSecond,
+  };
+
+  event.sender.send('ollama-stream', {
+    chatId,
+    timing: timingInfo,
+  });
+
+  if (manualResponse) {
+    event.sender.send('ollama-stream', {
+      chatId,
+      delta: manualResponse,
+      full: manualResponse,
+      done: false,
+      reasoning: reasoningTranscript || undefined,
+      timing: timingInfo,
+    });
+    event.sender.send('ollama-stream', {
+      chatId,
+      delta: '',
+      full: manualResponse,
+      done: true,
+      reasoning: reasoningTranscript || undefined,
+      timing: timingInfo,
+    });
+  }
+
   if (requestId) {
     activeRequests.delete(requestId);
   }
 
   const trimmedAnswer = assistantContent.trim();
-  if (!contextQueries.length) {
-    contextQueries = Array.isArray(contextResult.queries) && contextResult.queries.length
-      ? contextResult.queries
-      : searchPlan.disabled
-        ? searchPlan.queries
-        : [];
+  if (Array.isArray(contextResult.queries) && contextResult.queries.length) {
+    contextQueries = contextResult.queries;
+  } else if (!contextQueries.length) {
+    contextQueries = searchPlan.disabled && Array.isArray(searchPlan.queries) ? searchPlan.queries : [];
   }
   const contextRetrievedAt = contextResult.retrievedAt || null;
+  const usedWebSearch = Array.isArray(contextResult.entries) && contextResult.entries.length > 0;
+  const reusedConversationMemory =
+    !usedWebSearch && (conversationFirst || conversationAnalysis.confidence >= 0.65);
+  const finalReasoning = reasoningTranscript.trim();
 
   chat.messages.push(
     {
@@ -572,10 +1604,26 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
         context: contextResult.text,
         contextQueries,
         contextRetrievedAt,
-        usedWebSearch: Boolean(contextResult.text),
+        usedWebSearch,
+        reusedConversationMemory,
+        conversationConfidence: conversationAnalysis.confidence,
+        conversationCoverage: conversationAnalysis.coverageRatio,
+        goalAligned,
+        primaryGoal: initialGoal || undefined,
+        assistantTurnsBefore: assistantTurns,
+        webContextTurnsBefore: webContextTurns,
+        limitedWebContext: shouldLimitWebContext,
+        userLinks: contextResult.userLinks,
+        assistantSearchRequests: searchRetries,
+        reasoning: finalReasoning,
+        supportsReasoning: reasoningDetected,
+        attachments: contextResult.attachments,
+        timing: timingInfo,
       },
     }
   );
+
+  chat.conversationDigest = buildConversationDigest(chat);
 
   if (!chat.title || chat.title === 'New Chat') {
     chat.title = prompt.length > 60 ? `${prompt.slice(0, 60)}…` : prompt;
@@ -590,7 +1638,18 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     context: contextResult.text,
     contextQueries,
     contextRetrievedAt,
-    userLinks: userLinksForContext,
+    userLinks: contextResult.userLinks,
+    reusedConversationMemory,
+    primaryGoal: initialGoal || undefined,
+    goalAligned,
+    limitedWebContext: shouldLimitWebContext,
+    attachments: contextResult.attachments,
+    attachmentWarnings: attachmentsResult.warnings,
+    timing: timingInfo,
+    reasoning: finalReasoning,
+    usedWebSearch,
+    assistantSearchRequests: searchRetries,
+    supportsReasoning: reasoningDetected,
   };
 });
 
@@ -680,6 +1739,7 @@ function createChatRecord(model = null) {
     updatedAt: now,
     messages: [],
     initialUserPrompt: '',
+    attachments: [],
   };
 }
 
@@ -751,6 +1811,7 @@ async function ensureChatsLoaded() {
       chatsCache = parsed.map((chat) => ({
         ...chat,
         initialUserPrompt: typeof chat.initialUserPrompt === 'string' ? chat.initialUserPrompt : '',
+        attachments: Array.isArray(chat.attachments) ? sanitizeStoredAttachments(chat.attachments) : [],
       }));
     } else {
       chatsCache = [];
@@ -767,6 +1828,9 @@ async function ensureChatsLoaded() {
             ? parsed.map((chat) => ({
                 ...chat,
                 initialUserPrompt: typeof chat.initialUserPrompt === 'string' ? chat.initialUserPrompt : '',
+                attachments: Array.isArray(chat.attachments)
+                  ? sanitizeStoredAttachments(chat.attachments)
+                  : [],
               }))
             : [];
           migrated = true;
@@ -827,6 +1891,13 @@ async function persistSettings() {
   settings = safeSettings;
   await fsPromises.mkdir(path.dirname(settingsPath), { recursive: true });
   await fsPromises.writeFile(settingsPath, JSON.stringify(safeSettings, null, 2), 'utf8');
+}
+
+function getRendererSafeSettings() {
+  const safe = sanitizeSettings(settings);
+  settings = safe;
+  const { analyticsDeviceId, ...publicSettings } = safe || {};
+  return publicSettings;
 }
 
 function getChatSummaries() {
@@ -959,6 +2030,25 @@ function applySettingsPatch(base, partial) {
     next.showTutorial = Boolean(partial.showTutorial);
   }
 
+  if (partial.shareAnalytics !== undefined) {
+    next.shareAnalytics = Boolean(partial.shareAnalytics);
+  }
+
+  if (partial.analyticsDeviceId !== undefined) {
+    const value =
+      typeof partial.analyticsDeviceId === 'string' && partial.analyticsDeviceId.trim()
+        ? partial.analyticsDeviceId.trim()
+        : null;
+    if (value) {
+      next.analyticsDeviceId = value;
+    }
+  }
+
+  if (partial.ollamaEndpoint !== undefined) {
+    const endpoint = normalizeOllamaEndpoint(partial.ollamaEndpoint);
+    next.ollamaEndpoint = endpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  }
+
   return next;
 }
 
@@ -1019,18 +2109,24 @@ async function performWebSearch(queries, options = {}) {
   const maxEntries = clampSearchLimit(
     options && options.limit !== undefined ? Number(options.limit) : DEFAULT_SETTINGS.searchResultLimit
   );
+  const searchTimeout = Number.isFinite(options?.timeoutMs)
+    ? Math.max(1500, Number(options.timeoutMs))
+    : 7000;
+  const pageTimeout = Number.isFinite(options?.pageTimeoutMs)
+    ? Math.max(1500, Number(options.pageTimeoutMs))
+    : 6000;
   const retrievedAt = new Date().toISOString();
 
   try {
     /* eslint-disable no-await-in-loop */
     for (const query of uniqueQueries) {
       const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&ia=web`;
-      const res = await fetch(url, {
+      const res = await fetchWithTimeout(url, {
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15',
         },
-      });
+      }, searchTimeout);
 
       if (!res.ok) {
         throw new Error(`DuckDuckGo HTTP ${res.status}`);
@@ -1084,6 +2180,7 @@ async function performWebSearch(queries, options = {}) {
     const enrichedEntries = await enrichEntriesWithPageContent(entries, {
       maxPages: Math.min(entries.length, Math.max(1, Math.min(4, maxEntries))),
       maxCharsPerEntry: 1400,
+      timeoutMs: pageTimeout,
     });
 
     return {
@@ -1098,6 +2195,43 @@ async function performWebSearch(queries, options = {}) {
   }
 }
 
+function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const { signal: externalSignal, ...rest } = options || {};
+  let externalAbortHandler = null;
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      clearTimeout(timeoutId);
+      return Promise.reject(new Error('The operation was aborted.'));
+    }
+
+    externalAbortHandler = () => controller.abort();
+    if (typeof externalSignal.addEventListener === 'function') {
+      externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
+    }
+  }
+
+  const cleanup = () => {
+    clearTimeout(timeoutId);
+    if (externalSignal && externalAbortHandler && typeof externalSignal.removeEventListener === 'function') {
+      externalSignal.removeEventListener('abort', externalAbortHandler);
+    }
+  };
+
+  return fetch(url, { ...rest, signal: controller.signal })
+    .catch((err) => {
+      if (err.name === 'AbortError') {
+        const timeoutError = new Error(`Request timed out after ${timeoutMs}ms`);
+        timeoutError.name = 'TimeoutError';
+        throw timeoutError;
+      }
+      throw err;
+    })
+    .finally(cleanup);
+}
+
 async function enrichEntriesWithPageContent(entries, options = {}) {
   const result = entries.map((entry) => ({ ...entry }));
   const maxPages = Math.max(
@@ -1105,6 +2239,9 @@ async function enrichEntriesWithPageContent(entries, options = {}) {
     Math.min(options?.maxPages ?? Math.min(3, result.length), result.length)
   );
   const maxChars = Math.max(400, options?.maxCharsPerEntry ?? 1400);
+  const pageTimeout = Number.isFinite(options?.timeoutMs)
+    ? Math.max(1500, Number(options.timeoutMs))
+    : 6000;
   let fetchedCount = 0;
 
   /* eslint-disable no-await-in-loop */
@@ -1119,14 +2256,14 @@ async function enrichEntriesWithPageContent(entries, options = {}) {
     }
 
     try {
-      const res = await fetch(entry.url, {
+      const res = await fetchWithTimeout(entry.url, {
         headers: {
           'User-Agent':
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15',
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         },
         redirect: 'follow',
-      });
+      }, pageTimeout);
 
       if (!res.ok || !res.headers.get('content-type')?.includes('text/html')) {
         continue;
@@ -1219,6 +2356,22 @@ function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '',
   const focusTerms = Array.isArray(options?.focusTerms)
     ? options.focusTerms.filter((value) => typeof value === 'string' && value.trim().length > 0)
     : [];
+  const conversationConfidence =
+    typeof options?.conversationConfidence === 'number'
+      ? Math.max(0, Math.min(1, options.conversationConfidence))
+      : 0;
+  const conversationCoverage =
+    typeof options?.conversationCoverage === 'number'
+      ? Math.max(0, Math.min(1, options.conversationCoverage))
+      : 0;
+  const missingTerms = Array.isArray(options?.missingTerms)
+    ? options.missingTerms.map((token) => String(token || '').trim()).filter(Boolean)
+    : [];
+  const promptTokenCount = Number.isFinite(options?.promptTokenCount) ? options.promptTokenCount : null;
+  const longRunning = Boolean(options?.longRunning);
+  const goalAligned = options?.goalAligned !== false;
+  const assistantTurns = Number.isFinite(options?.assistantTurns) ? options.assistantTurns : 0;
+  const webContextTurns = Number.isFinite(options?.webContextTurns) ? options.webContextTurns : 0;
 
   if (directiveDetected && !directiveQuery) {
     return {
@@ -1274,15 +2427,65 @@ function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '',
   }
 
   const hasQueries = queries.length > 0;
-  const shouldSearch = autoEnabled ? hasQueries || baseShouldSearch || genericFresh : baseShouldSearch || genericFresh;
+  let shouldSearch = autoEnabled ? hasQueries || baseShouldSearch || genericFresh : baseShouldSearch || genericFresh;
+  const minimalGaps =
+    missingTerms.length === 0 ||
+    (missingTerms.length === 1 && (promptTokenCount === null || promptTokenCount > 1));
+  let overrideMessage = null;
+
+  if (!directiveDetected) {
+    const highConfidence = conversationConfidence >= 0.65;
+    const veryHighConfidence = conversationConfidence >= 0.85;
+
+    if (veryHighConfidence && !genericFresh) {
+      shouldSearch = false;
+    } else if (
+      highConfidence &&
+      !genericFresh &&
+      minimalGaps &&
+      (conversationCoverage >= 0.6 || !baseShouldSearch)
+    ) {
+      shouldSearch = false;
+    } else if (highConfidence && longRunning && !genericFresh && conversationCoverage >= 0.55) {
+      shouldSearch = false;
+    }
+
+    if (!goalAligned) {
+      shouldSearch = false;
+      overrideMessage = 'Staying on the original objective – skipping new web search.';
+    } else if (assistantTurns >= 2) {
+      if (webContextTurns >= 1) {
+        shouldSearch = false;
+        overrideMessage = 'Reusing earlier web findings instead of refreshing search results.';
+      } else if (
+        !genericFresh &&
+        minimalGaps &&
+        (conversationCoverage >= 0.3 || conversationConfidence >= 0.5)
+      ) {
+        shouldSearch = false;
+        overrideMessage = 'Existing context covers this follow-up – no new web search required.';
+      } else if (shouldSearch) {
+        queries = queries.slice(0, Math.min(2, queries.length));
+        overrideMessage = 'Focused refresh of web context to refine the original goal.';
+      }
+    }
+  }
+
   const directiveSummary = directiveQuery ? truncateForSearch(directiveQuery, 120) : '';
-  const message = directiveQuery
+  let message = directiveQuery
     ? `Targeted request detected – gathering information for "${directiveSummary}".`
     : genericFresh
       ? 'Broad request detected – gathering current headlines.'
       : autoEnabled
         ? 'Automatic web search is enabled – gathering supporting snippets.'
         : 'Collecting supporting information from the web.';
+
+  if (!directiveDetected && !genericFresh && !shouldSearch && conversationConfidence >= 0.65) {
+    message = 'Leaning on conversation memory – no new web search required.';
+  }
+  if (overrideMessage) {
+    message = overrideMessage;
+  }
 
   return {
     shouldSearch,
@@ -1472,9 +2675,12 @@ function buildBaseSystemPrompt() {
   return [
     'You are a precise assistant that values factual accuracy and depth.',
     'Use the conversation history and supplied context to craft comprehensive, user-facing answers.',
+    'Prioritize the existing conversation memory over new web searches; rely on dialogue unless essential details are missing.',
     'Never assume the user can open a website—surface the key facts directly in your reply.',
     'Cite the source domain in parentheses when you use supplied context.',
     'If the provided context does not answer the question, say you do not know.',
+    'When you truly require fresh web information, reply with exactly [[search: your query]] and nothing else, then wait for new context before answering.',
+    'Do not emit the [[search: …]] directive unless the conversation and provided context cannot answer the request.',
   ].join(' ');
 }
 
@@ -1483,7 +2689,8 @@ function buildGoalInstruction(initialGoal, latestPrompt) {
     'Conversation objective:',
     initialGoal,
     '',
-    'Every answer should support this original goal. Use follow-up questions to refine or extend the same objective, not to replace it.',
+    'Every answer must drive progress on this objective. Use follow-up questions to refine or extend the same goal, not to replace it.',
+    'If the user attempts to pivot away from this goal, remind them of the original objective and suggest starting a new chat for the new topic before offering assistance.',
   ];
 
   if (latestPrompt && latestPrompt.trim() && latestPrompt.length < 240) {
@@ -1493,12 +2700,22 @@ function buildGoalInstruction(initialGoal, latestPrompt) {
   return lines.join('\n');
 }
 
+function buildGoalGuardrailInstruction(initialGoal) {
+  return [
+    'Guardrail:',
+    'Do not switch tasks during this chat.',
+    `If the user asks for something unrelated, restate that the active goal is: ${initialGoal}`,
+    'Politely offer to begin a new chat for any unrelated requests and steer the conversation back to the original objective.',
+  ].join('\n');
+}
+
 function buildContextInstruction({ context, retrievedAt, genericFresh }) {
   const lines = [
     'Incorporate the verified facts from the context below when answering.',
     'Never invent information that is not supported by the context or prior conversation.',
     'If the web context directly answers the question, use it; otherwise fall back to the prior conversation.',
     'Give precedence to user-provided links when they are relevant to the question.',
+    'Refer to uploaded files using the notation (uploaded: filename) when you cite them.',
     'Provide a thorough, well-structured answer that explains key details and the implications of those facts.',
     'Draw connections between sources when helpful and end with clear takeaways or next steps when appropriate.',
   ];
@@ -1597,8 +2814,214 @@ function truncateSnippet(snippet) {
 }
 
 
+function hasNetworkConnectivity(timeoutMs = 2500, cacheMs = 5000) {
+  if (!dnsPromises || typeof dnsPromises.lookup !== 'function') {
+    return Promise.resolve(true);
+  }
+
+  const now = Date.now();
+  if (now - lastConnectivityCheck < cacheMs) {
+    return Promise.resolve(lastConnectivityStatus);
+  }
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finalize = (status) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      lastConnectivityCheck = Date.now();
+      lastConnectivityStatus = status;
+      resolve(status);
+    };
+
+    const timer = setTimeout(() => finalize(false), timeoutMs);
+
+    dnsPromises
+      .lookup('duckduckgo.com')
+      .then(() => {
+        clearTimeout(timer);
+        finalize(true);
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        finalize(false);
+      });
+  });
+}
+
+
+function sanitizeAttachmentsPayload(rawAttachments = []) {
+  if (!Array.isArray(rawAttachments) || !rawAttachments.length) {
+    return { entries: [], summary: [], block: '', warnings: [] };
+  }
+
+  const limited = rawAttachments.slice(0, MAX_ATTACHMENTS_PER_PROMPT);
+  const entries = [];
+  const summary = [];
+  const warnings = [];
+  let totalBytes = 0;
+
+  for (const attachment of limited) {
+    if (!attachment || typeof attachment !== 'object') {
+      continue;
+    }
+
+    const name = String(attachment.name || '').trim() || 'attachment.txt';
+    const size = Number.isFinite(attachment.size) ? Math.max(0, Number(attachment.size)) : 0;
+    let content = typeof attachment.content === 'string' ? attachment.content : '';
+    if (!content.trim()) {
+      continue;
+    }
+
+    let sanitized = truncateContentToBytes(content, MAX_ATTACHMENT_BYTES);
+    let sanitizedBytes = Buffer.byteLength(sanitized, 'utf8');
+    let truncated = sanitized.length < content.length;
+
+    if (sanitized.length > MAX_ATTACHMENT_CHARS) {
+      const sliced = sanitized.slice(0, MAX_ATTACHMENT_CHARS);
+      sanitized = `${sliced}\n… [truncated]`;
+      sanitized = truncateContentToBytes(sanitized, MAX_ATTACHMENT_BYTES);
+      sanitizedBytes = Buffer.byteLength(sanitized, 'utf8');
+      truncated = true;
+      warnings.push(`Trimmed ${name} to ${MAX_ATTACHMENT_CHARS.toLocaleString()} characters to keep it manageable.`);
+    }
+
+    if (totalBytes + sanitizedBytes > MAX_ATTACHMENT_TOTAL_BYTES) {
+      const remaining = MAX_ATTACHMENT_TOTAL_BYTES - totalBytes;
+      if (remaining <= 0) {
+        warnings.push(`Skipping ${name} because it exceeds the total attachment limit.`);
+        break;
+      }
+      const clipped = truncateContentToBytes(sanitized, remaining);
+      if (!clipped.trim()) {
+        warnings.push(`Skipping ${name} because it exceeds the total attachment limit.`);
+        break;
+      }
+      sanitized = clipped;
+      sanitizedBytes = Buffer.byteLength(sanitized, 'utf8');
+      truncated = true;
+      warnings.push(`Trimmed ${name} to stay within the total attachment limit (${formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)}).`);
+    }
+
+    totalBytes += sanitizedBytes;
+
+    entries.push({
+      name,
+      size,
+      bytes: sanitizedBytes,
+      truncated,
+      content: sanitized,
+    });
+    summary.push({
+      name,
+      size,
+      truncated,
+    });
+  }
+
+  const block = buildAttachmentsContext(entries);
+
+  return { entries, summary, block, warnings };
+}
+
+function sanitizeStoredAttachments(rawAttachments = []) {
+  if (!Array.isArray(rawAttachments) || !rawAttachments.length) {
+    return [];
+  }
+
+  const limited = rawAttachments.slice(0, MAX_ATTACHMENTS_PER_PROMPT);
+  const sanitized = [];
+  let totalBytes = 0;
+
+  for (const attachment of limited) {
+    if (!attachment || typeof attachment !== 'object') {
+      continue;
+    }
+
+    const name = String(attachment.name || '').trim() || 'attachment.txt';
+    const size = Number.isFinite(attachment.size) ? Math.max(0, Number(attachment.size)) : 0;
+    const displaySize =
+      typeof attachment.displaySize === 'string' && attachment.displaySize.trim()
+        ? attachment.displaySize.trim()
+        : formatBytes(size);
+    const rawContent = typeof attachment.content === 'string' ? attachment.content : '';
+    if (!rawContent.trim()) {
+      continue;
+    }
+
+    let content = truncateContentToBytes(rawContent, MAX_ATTACHMENT_BYTES);
+    let bytes = Buffer.byteLength(content, 'utf8');
+    let truncated = Boolean(attachment.truncated) || content.length < rawContent.length;
+
+    if (content.length > MAX_ATTACHMENT_CHARS) {
+      const sliced = content.slice(0, MAX_ATTACHMENT_CHARS);
+      content = `${sliced}\n… [truncated]`;
+      content = truncateContentToBytes(content, MAX_ATTACHMENT_BYTES);
+      bytes = Buffer.byteLength(content, 'utf8');
+      truncated = true;
+    }
+
+    if (totalBytes + bytes > MAX_ATTACHMENT_TOTAL_BYTES) {
+      const remaining = MAX_ATTACHMENT_TOTAL_BYTES - totalBytes;
+      if (remaining <= 0) {
+        break;
+      }
+      const clipped = truncateContentToBytes(content, remaining);
+      if (!clipped.trim()) {
+        break;
+      }
+      content = clipped;
+      bytes = Buffer.byteLength(content, 'utf8');
+      truncated = true;
+    }
+
+    totalBytes += bytes;
+
+    sanitized.push({
+      id: typeof attachment.id === 'string' && attachment.id ? attachment.id : randomUUID(),
+      name,
+      size,
+      displaySize,
+      bytes,
+      truncated,
+      content,
+    });
+  }
+
+  return sanitized;
+}
+
+function buildAttachmentsContext(entries) {
+  if (!Array.isArray(entries) || !entries.length) {
+    return '';
+  }
+
+  const lines = ['Uploaded files provided by the user:'];
+
+  entries.forEach((entry, index) => {
+    const headerParts = [`File ${index + 1}: ${entry.name}`];
+    if (Number.isFinite(entry.size) && entry.size > 0) {
+      headerParts.push(`(${formatBytes(entry.size)})`);
+    }
+    if (entry.truncated) {
+      headerParts.push(`[First ${MAX_ATTACHMENT_CHARS.toLocaleString()} characters shown]`);
+    }
+    lines.push('', headerParts.join(' '));
+    lines.push(entry.content.trim());
+  });
+
+  return lines.join('\n');
+}
+
+
 function buildSearchPrompt(chat, currentPrompt) {
   const contextParts = [];
+
+  if (chat?.conversationDigest) {
+    contextParts.push(`Conversation digest:\n${truncateForSearch(chat.conversationDigest, 1200)}`);
+  }
 
   const userMessages = (chat.messages || []).filter((msg) => msg.role === 'user');
   if (!userMessages.length) {
@@ -1743,6 +3166,88 @@ function deriveFollowUpFocus(chat, prompt) {
   return Array.from(new Set(focus)).slice(0, 8);
 }
 
+function countAssistantTurns(chat) {
+  if (!chat || !Array.isArray(chat.messages)) {
+    return 0;
+  }
+  return chat.messages.reduce(
+    (count, message) => (message?.role === 'assistant' ? count + 1 : count),
+    0
+  );
+}
+
+function countWebContextTurns(chat) {
+  if (!chat || !Array.isArray(chat.messages)) {
+    return 0;
+  }
+
+  return chat.messages.reduce((count, message) => {
+    if (message?.role !== 'assistant') {
+      return count;
+    }
+    const meta = message.meta || {};
+    const usedContext =
+      Boolean(meta.usedWebSearch) ||
+      (typeof meta.context === 'string' && meta.context.trim().length > 0);
+    return usedContext ? count + 1 : count;
+  }, 0);
+}
+
+function isPromptAlignedWithGoal(initialGoal, prompt) {
+  if (!initialGoal || !prompt) {
+    return true;
+  }
+
+  const goalTokens = tokenizeForComparison(initialGoal);
+  const promptTokens = tokenizeForComparison(prompt);
+
+  if (!goalTokens.length || !promptTokens.length) {
+    return true;
+  }
+
+  const goalSet = new Set(goalTokens);
+  const overlap = promptTokens.filter((token) => goalSet.has(token));
+  if (!overlap.length) {
+    return promptTokens.length <= 1;
+  }
+
+  if (promptTokens.length <= 2) {
+    return true;
+  }
+
+  const promptCoverage = overlap.length / promptTokens.length;
+  const goalCoverage = overlap.length / goalSet.size;
+
+  return (
+    overlap.length >= 3 ||
+    promptCoverage >= 0.4 ||
+    goalCoverage >= 0.5 ||
+    (promptTokens.length <= 4 && overlap.length >= 1)
+  );
+}
+
+function limitContextForFollowUp(text, maxSegments = 2, maxChars = 1200) {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+
+  const segments = text
+    .split(/\n{2,}/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+
+  if (!segments.length) {
+    return text.trim();
+  }
+
+  const limited = segments.slice(0, Math.max(1, maxSegments));
+  let combined = limited.join('\n\n');
+  if (combined.length > maxChars) {
+    combined = `${combined.slice(0, maxChars - 1)}…`;
+  }
+  return combined;
+}
+
 function tokenizeForComparison(text) {
   if (!text || typeof text !== 'string') {
     return [];
@@ -1754,6 +3259,85 @@ function tokenizeForComparison(text) {
     .split(/\s+/)
     .filter((token) => token && token.length > 2 && !TOKEN_STOP_WORDS.has(token))
     .slice(0, 20);
+}
+
+function estimateTokenCount(text) {
+  if (!text || typeof text !== 'string') {
+    return 0;
+  }
+
+  return text
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean).length;
+}
+
+function truncateContentToBytes(text, maxBytes) {
+  if (!text || typeof text !== 'string') {
+    return '';
+  }
+
+  if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
+    return '';
+  }
+
+  let buffer = Buffer.from(text, 'utf8');
+  if (buffer.length <= maxBytes) {
+    return text;
+  }
+
+  buffer = buffer.slice(0, maxBytes);
+  let truncated = buffer.toString('utf8');
+
+  // Handle potential partial multi-byte at the end.
+  while (truncated.length && Buffer.byteLength(truncated, 'utf8') > maxBytes) {
+    truncated = truncated.slice(0, -1);
+  }
+
+  return truncated;
+}
+
+function isLikelyBinary(text) {
+  if (!text) {
+    return false;
+  }
+
+  const length = Math.min(text.length, 1024);
+  let suspicious = 0;
+  for (let index = 0; index < length; index += 1) {
+    const charCode = text.charCodeAt(index);
+    if (charCode === 0) {
+      return true;
+    }
+    if (charCode < 32 && charCode !== 9 && charCode !== 10 && charCode !== 13) {
+      suspicious += 1;
+      if (suspicious / length > 0.05) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '0 B';
+  }
+
+  if (bytes === 0) {
+    return '0 B';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function buildQueriesFromFocusTerms(terms, fallbackPrompt, initialGoal) {
@@ -1780,4 +3364,229 @@ function buildQueriesFromFocusTerms(terms, fallbackPrompt, initialGoal) {
   }
 
   return queries.slice(0, 4);
+}
+
+function analyzeConversationGrounding(chat, prompt) {
+  const empty = {
+    confidence: 0,
+    coverageRatio: 0,
+    missingTerms: [],
+    promptTokens: [],
+    longRunning: false,
+    assistantTurns: 0,
+    hasStoredContext: false,
+    lastContextAgeMinutes: null,
+  };
+
+  if (!chat || !Array.isArray(chat.messages) || !prompt) {
+    return empty;
+  }
+
+  const promptTokens = tokenizeForComparison(prompt);
+  if (!promptTokens.length) {
+    return { ...empty, promptTokens };
+  }
+
+  const assistantMessages = chat.messages.filter((message) => message?.role === 'assistant');
+  const assistantTurns = assistantMessages.length;
+  const longRunning = assistantTurns >= 3 || (chat.messages || []).length >= 6;
+
+  const coverageTokens = new Set();
+  const lookbackWindow = Math.max(0, chat.messages.length - 12);
+
+  for (let index = lookbackWindow; index < chat.messages.length; index += 1) {
+    const message = chat.messages[index];
+    if (!message || !message.content) {
+      continue;
+    }
+
+    tokenizeForComparison(message.content).forEach((token) => coverageTokens.add(token));
+
+    if (message.meta?.context) {
+      tokenizeForComparison(message.meta.context).forEach((token) => coverageTokens.add(token));
+    }
+  }
+
+  const missingTerms = promptTokens.filter((token) => !coverageTokens.has(token));
+  const coverageRatio = promptTokens.length
+    ? (promptTokens.length - missingTerms.length) / promptTokens.length
+    : 0;
+
+  const lastAssistant = [...assistantMessages].reverse().find(Boolean) || null;
+  const hasStoredContext = Boolean(lastAssistant?.meta?.context && lastAssistant.meta.context.trim());
+  const retrievedAt = lastAssistant?.meta?.contextRetrievedAt || null;
+  let lastContextAgeMinutes = null;
+  if (retrievedAt) {
+    const retrievedTimestamp = new Date(retrievedAt).getTime();
+    if (Number.isFinite(retrievedTimestamp)) {
+      lastContextAgeMinutes = Math.max(
+        0,
+        Math.floor((Date.now() - retrievedTimestamp) / (1000 * 60))
+      );
+    }
+  }
+
+  let confidence = 0;
+  if (longRunning) {
+    confidence += 0.35;
+  }
+  if (assistantTurns >= 6) {
+    confidence += 0.15;
+  } else if (assistantTurns >= 3) {
+    confidence += 0.1;
+  }
+
+  if (coverageRatio >= 0.8) {
+    confidence += 0.4;
+  } else if (coverageRatio >= 0.6) {
+    confidence += 0.28;
+  } else if (coverageRatio >= 0.45) {
+    confidence += 0.15;
+  }
+
+  if (hasStoredContext) {
+    confidence += 0.12;
+  }
+
+  if (lastContextAgeMinutes !== null) {
+    if (lastContextAgeMinutes <= 30) {
+      confidence += 0.05;
+    } else if (lastContextAgeMinutes >= 240) {
+      confidence -= 0.08;
+    }
+  }
+
+  confidence = Math.max(0, Math.min(1, confidence));
+
+  return {
+    confidence,
+    coverageRatio,
+    missingTerms,
+    promptTokens,
+    longRunning,
+    assistantTurns,
+    hasStoredContext,
+    lastContextAgeMinutes,
+  };
+}
+
+function appendContextSection(existing, addition) {
+  const base = existing && existing.trim() ? existing.trim() : '';
+  const extra = addition && addition.trim() ? addition.trim() : '';
+  if (!base) {
+    return extra;
+  }
+  if (!extra) {
+    return base;
+  }
+  return `${base}\n\n---\n\n${extra}`;
+}
+
+function buildConversationDigest(chat, maxLength = 1400) {
+  if (!chat || !Array.isArray(chat.messages) || !chat.messages.length) {
+    return '';
+  }
+
+  const relevant = chat.messages
+    .filter((message) => message?.content && (message.role === 'assistant' || message.role === 'user'))
+    .slice(-10);
+
+  if (!relevant.length) {
+    return '';
+  }
+
+  const lines = relevant.map((message) => {
+    const prefix = message.role === 'assistant' ? 'Assistant' : 'User';
+    const normalized = message.content.replace(/\s+/g, ' ').trim();
+    return `${prefix}: ${normalized}`;
+  });
+
+  let digest = lines.join('\n');
+  if (digest.length > maxLength) {
+    digest = digest.slice(digest.length - maxLength);
+    const firstNewline = digest.indexOf('\n');
+    if (firstNewline !== -1) {
+      digest = digest.slice(firstNewline + 1);
+    }
+  }
+
+  return digest.trim();
+}
+
+function extractSearchDirective(text) {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('[[') || !trimmed.endsWith(']]')) {
+    return null;
+  }
+
+  const match = trimmed.match(/\[\[search:\s*(.+?)\s*\]\]/i);
+  if (!match || !match[1]) {
+    return null;
+  }
+
+  const before = trimmed.slice(0, match.index).trim();
+  const after = trimmed.slice(match.index + match[0].length).trim();
+  if (before || after) {
+    return null;
+  }
+
+  return match[1].trim();
+}
+
+function flattenReasoningPayload(payload, seen = new Set()) {
+  if (payload === null || payload === undefined) {
+    return '';
+  }
+
+  if (typeof payload === 'string') {
+    return payload;
+  }
+
+  if (typeof payload === 'number' || typeof payload === 'boolean') {
+    return String(payload);
+  }
+
+  if (Array.isArray(payload)) {
+    return payload
+      .map((item) => flattenReasoningPayload(item, seen))
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  if (typeof payload === 'object') {
+    if (seen.has(payload)) {
+      return '';
+    }
+    seen.add(payload);
+
+    const preferredKeys = ['text', 'thought', 'output', 'content', 'explanation'];
+    for (const key of preferredKeys) {
+      if (payload[key]) {
+        const value = flattenReasoningPayload(payload[key], seen);
+        if (value) {
+          return value;
+        }
+      }
+    }
+
+    if (payload.reasoning && payload.reasoning !== payload) {
+      const inner = flattenReasoningPayload(payload.reasoning, seen);
+      if (inner) {
+        return inner;
+      }
+    }
+
+    const merged = Object.values(payload)
+      .map((value) => flattenReasoningPayload(value, seen))
+      .filter(Boolean)
+      .join('\n');
+
+    return merged;
+  }
+
+  return '';
 }

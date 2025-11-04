@@ -11,6 +11,9 @@ const exposeAPI = {
   createChat: (model) => ipcRenderer.invoke('create-chat', { model }),
   getChat: (chatId) => ipcRenderer.invoke('get-chat', { chatId }),
   deleteAllChats: () => ipcRenderer.invoke('delete-all-chats'),
+  pickLocalFiles: (options) => ipcRenderer.invoke('pick-local-files', options),
+  setChatAttachments: ({ chatId, attachments }) =>
+    ipcRenderer.invoke('set-chat-attachments', { chatId, attachments }),
   checkForUpdates: () => ipcRenderer.invoke('check-for-updates'),
   onStream: (callback) => {
     const listener = (_event, data) => callback(data);
@@ -33,6 +36,9 @@ const exposeAPI = {
     ipcRenderer.on('auto-update-progress', listener);
     return () => ipcRenderer.removeListener('auto-update-progress', listener);
   },
+  initAnalytics: (options) => ipcRenderer.invoke('analytics-init', options),
+  setAnalyticsOptOut: (optOut) => ipcRenderer.invoke('analytics-set-opt-out', optOut),
+  trackAnalyticsEvent: (name, props) => ipcRenderer.invoke('analytics-track', { name, props }),
 };
 
 contextBridge.exposeInMainWorld('api', exposeAPI);
