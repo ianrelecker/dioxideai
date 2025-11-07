@@ -87,6 +87,3 @@ dioxideai/
 └─ assets/         # Support graphics & app assets
 ```
 
-## License
-
-MIT © Your Name
