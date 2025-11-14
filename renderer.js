@@ -15,9 +15,6 @@ let settingsOverlay;
 let settingsPanel;
 let settingsCloseButton;
 let settingsForm;
-let autoWebSearchToggle;
-let searchResultLimitInput;
-let searchResultValue;
 let themeSelect;
 let sidebarCollapseToggle;
 let deleteAllChatsButton;
@@ -27,10 +24,6 @@ let tutorialCloseButton;
 let tutorialStartButton;
 let tutorialDismissCheckbox;
 let openTutorialButton;
-let supportOverlay;
-let supportPanel;
-let supportCloseButton;
-let supportButton;
 let attachButton;
 let attachmentListEl;
 let attachmentNoticeEl;
@@ -40,6 +33,17 @@ let toastHost;
 let shareAnalyticsToggle;
 let tutorialAnalyticsCheckbox;
 let ollamaEndpointInput;
+let deepResearchShelf;
+let deepResearchHeadline;
+let deepResearchStageLabel;
+let deepResearchTimeline;
+let deepResearchSummaryCard;
+let deepResearchSummaryText;
+let deepResearchInsertButton;
+let deepResearchCopyButton;
+let deepResearchDismissButton;
+let composerDeepResearchButton;
+let deepResearchDetails;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
@@ -52,10 +56,11 @@ const DEFAULT_SETTINGS = {
   ollamaEndpoint: 'http://localhost:11434',
 };
 
-const ATTACHMENT_LIMIT = 4;
+const ATTACHMENT_LIMIT = 1;
 const ATTACHMENT_MAX_FILE_BYTES = 512 * 1024;
 const ATTACHMENT_TOTAL_BYTES = 1024 * 1024;
 const ATTACHMENT_CHAR_LIMIT = 4000;
+const DEFAULT_DEEP_RESEARCH_ITERATIONS = 4;
 
 const state = {
   chats: [],
@@ -73,6 +78,7 @@ const state = {
   attachmentWarnings: [],
   attachmentProcessingStartedAt: null,
   sidebarCollapsed: false,
+  deepResearch: createDeepResearchState(),
 };
 
 const activeToasts = new Map();
@@ -96,6 +102,151 @@ function extractLinks(input) {
   const matches = input.match(urlRegex) || [];
   const unique = new Set(matches.map((link) => link.trim()));
   return Array.from(unique);
+}
+
+function createDeepResearchState() {
+  return {
+    enabled: false,
+    running: false,
+    requestId: null,
+    chatId: null,
+    topic: '',
+    stage: '',
+    message: '',
+    iteration: 0,
+    totalIterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+    timeline: [],
+    summary: '',
+    sources: [],
+    error: null,
+    lastUpdated: null,
+    statusLine: '',
+    answer: '',
+    log: [],
+    primaryGoal: '',
+  };
+}
+
+function syncDeepResearchStatusLine() {
+  if (!state.deepResearch.running) {
+    return;
+  }
+  const status = state.deepResearch.statusLine?.trim();
+  if (!status) {
+    return;
+  }
+  const entry = state.activeAssistantEntry;
+  if (entry?.setLoadingStatus) {
+    entry.setLoadingStatus(status);
+  }
+}
+
+function appendDeepResearchLog(log = [], payload = {}) {
+  const line = describeDeepResearchProgress(payload);
+  if (!line) {
+    return Array.isArray(log) ? log : [];
+  }
+  const next = Array.isArray(log) ? [...log, line] : [line];
+  return next.slice(-8);
+}
+
+function describeDeepResearchProgress(payload = {}) {
+  const parts = [];
+  if (Number.isFinite(payload.iteration) && payload.iteration > 0) {
+    const total = Number.isFinite(payload.totalIterations) ? payload.totalIterations : null;
+    parts.push(`Pass ${payload.iteration}${total ? `/${total}` : ''}`);
+  } else if (payload.stage === 'planning') {
+    parts.push('Planning');
+  }
+
+  if (payload.message) {
+    parts.push(payload.message);
+  } else {
+    switch (payload.stage) {
+      case 'iteration-start':
+        parts.push('Searching for new sources…');
+        break;
+      case 'iteration-review':
+        parts.push('Reviewing captured sources…');
+        break;
+      case 'iteration-reflection':
+        parts.push('Analyzing coverage…');
+        break;
+      case 'model-draft':
+        parts.push('Drafting answer from findings…');
+        break;
+      case 'model-eval':
+        parts.push('Evaluating draft answer…');
+        break;
+      case 'model-error':
+        parts.push('Draft synthesis failed.');
+        break;
+      case 'iteration-error':
+        parts.push('Search failed.');
+        break;
+      default:
+        break;
+    }
+  }
+
+  return parts.filter(Boolean).join(' – ');
+}
+
+function buildDeepResearchProgressLabel(dr) {
+  if (!dr?.running) {
+    return '';
+  }
+  if (Number.isFinite(dr.iteration) && dr.iteration > 0) {
+    const total = Number.isFinite(dr.totalIterations) ? dr.totalIterations : null;
+    return `Deep research – Pass ${dr.iteration}${total ? `/${total}` : ''}`;
+  }
+  return 'Deep research – Preparing…';
+}
+
+function buildDeepResearchLogText(log, fallback) {
+  if (Array.isArray(log) && log.length) {
+    return log.join('\n');
+  }
+  return fallback || '';
+}
+
+function updateDeepResearchLiveOutput() {
+  const entry = state.activeAssistantEntry;
+  const dr = state.deepResearch;
+  if (!entry || !dr?.running) {
+    return;
+  }
+  const label = buildDeepResearchProgressLabel(dr);
+  if (label) {
+    entry.setSummary(label);
+  }
+  const status = dr.statusLine || dr.message || 'Running deep research…';
+  entry.setLoadingStatus?.(status);
+  const logText = buildDeepResearchLogText(dr.log, status);
+  if (logText) {
+    entry.setThought(logText);
+    entry.openThoughts();
+  }
+}
+
+function formatDeepResearchStatusLine(payload, snapshot = {}) {
+  if (!payload) {
+    return '';
+  }
+  const stage = payload.stage || snapshot.stage;
+  if (stage === 'complete' || stage === 'error') {
+    return '';
+  }
+  const totalIterations = Number.isFinite(snapshot.totalIterations)
+    ? snapshot.totalIterations
+    : DEFAULT_DEEP_RESEARCH_ITERATIONS;
+  const parts = ['Deep research'];
+  if (Number.isFinite(payload.iteration) && payload.iteration > 0) {
+    parts.push(`Pass ${payload.iteration}/${totalIterations}`);
+  }
+  const base = parts.join(' · ');
+  const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+  return message ? `${base} – ${message}` : base;
 }
 
 function stopGeneration(requestId) {
@@ -207,6 +358,16 @@ function notifyAttachmentWarnings(warnings) {
   next.forEach((message) => {
     showToast(message, { variant: 'warning', duration: 7000 });
   });
+}
+
+function removeEmptyState() {
+  if (!chatArea) {
+    return;
+  }
+  const placeholder = chatArea.querySelector('.empty-state');
+  if (placeholder && placeholder.parentElement === chatArea) {
+    chatArea.removeChild(placeholder);
+  }
 }
 
 function trackAnalyticsEvent(name, props = {}) {
@@ -703,9 +864,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   settingsPanel = document.getElementById('settingsPanel');
   settingsCloseButton = document.getElementById('settingsCloseBtn');
   settingsForm = document.getElementById('settingsForm');
-  autoWebSearchToggle = document.getElementById('autoWebSearchToggle');
-  searchResultLimitInput = document.getElementById('searchResultLimit');
-  searchResultValue = document.getElementById('searchResultValue');
   themeSelect = document.getElementById('themeSelect');
   sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
   deleteAllChatsButton = document.getElementById('deleteAllChatsBtn');
@@ -715,10 +873,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   tutorialStartButton = document.getElementById('tutorialStartBtn');
   tutorialDismissCheckbox = document.getElementById('tutorialDismissCheckbox');
   openTutorialButton = document.getElementById('openTutorialBtn');
-  supportOverlay = document.getElementById('supportOverlay');
-  supportPanel = document.getElementById('supportPanel');
-  supportCloseButton = document.getElementById('supportCloseBtn');
-  supportButton = document.getElementById('supportBtn');
   attachButton = document.getElementById('attachBtn');
   attachmentListEl = document.getElementById('attachmentList');
   attachmentNoticeEl = document.getElementById('attachmentNotice');
@@ -728,6 +882,17 @@ window.addEventListener('DOMContentLoaded', async () => {
   shareAnalyticsToggle = document.getElementById('shareAnalyticsToggle');
   tutorialAnalyticsCheckbox = document.getElementById('tutorialAnalyticsCheckbox');
   ollamaEndpointInput = document.getElementById('ollamaEndpointInput');
+  composerDeepResearchButton = document.getElementById('composerDeepResearchBtn');
+  deepResearchShelf = document.getElementById('deepResearchShelf');
+  deepResearchHeadline = document.getElementById('deepResearchHeadline');
+  deepResearchStageLabel = document.getElementById('deepResearchStage');
+  deepResearchTimeline = document.getElementById('deepResearchTimeline');
+  deepResearchSummaryCard = document.getElementById('deepResearchSummaryCard');
+  deepResearchSummaryText = document.getElementById('deepResearchSummaryText');
+  deepResearchInsertButton = document.getElementById('deepResearchInsertBtn');
+  deepResearchCopyButton = document.getElementById('deepResearchCopyBtn');
+  deepResearchDismissButton = document.getElementById('deepResearchDismissBtn');
+  deepResearchDetails = document.getElementById('deepResearchDetails');
 
   registerGlobalDropGuards();
 
@@ -741,6 +906,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     await populateModels();
     await initializeChats();
     promptInput.focus();
+    updateDeepResearchShelf();
+    updateDeepResearchButtons();
   } catch (error) {
     console.error('Initialization failed:', error);
   }
@@ -793,6 +960,18 @@ function registerUIListeners() {
     await handleAttachmentPick();
   });
 
+  composerDeepResearchButton?.addEventListener('click', toggleDeepResearchEnabled);
+  composerDeepResearchButton?.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || state.isStreaming) {
+      return;
+    }
+    event.preventDefault();
+    await handlePromptSubmit();
+  });
+  deepResearchInsertButton?.addEventListener('click', handleDeepResearchInsert);
+  deepResearchCopyButton?.addEventListener('click', handleDeepResearchCopy);
+  deepResearchDismissButton?.addEventListener('click', dismissDeepResearchShelf);
+
   sidebarToggleBtn?.addEventListener('click', () => {
     const nextValue = !state.sidebarCollapsed;
     updateSidebarState(nextValue);
@@ -814,9 +993,6 @@ function registerUIListeners() {
   });
 
   settingsForm?.addEventListener('submit', (event) => event.preventDefault());
-  autoWebSearchToggle?.addEventListener('change', () =>
-    applySettingsUpdate({ autoWebSearch: autoWebSearchToggle.checked })
-  );
   themeSelect?.addEventListener('change', () => {
     const nextTheme = themeSelect.value;
     applyTheme(nextTheme);
@@ -856,27 +1032,9 @@ function registerUIListeners() {
     await applySettingsUpdate({ ollamaEndpoint: value });
     await populateModels();
   });
-  searchResultLimitInput?.addEventListener('input', () =>
-    updateSearchResultLabel(Number(searchResultLimitInput.value))
-  );
-  searchResultLimitInput?.addEventListener('change', () =>
-    applySettingsUpdate({ searchResultLimit: Number(searchResultLimitInput.value) })
-  );
 
   deleteAllChatsButton?.addEventListener('click', handleDeleteAllChats);
-  supportButton?.addEventListener('click', toggleSupportPopover);
-  supportCloseButton?.addEventListener('click', (event) => {
-    event.preventDefault();
-    closeSupportPopover();
-  });
-  supportOverlay?.addEventListener('click', (event) => {
-    if (event.target === supportOverlay || event.target.classList?.contains('support-backdrop')) {
-      closeSupportPopover();
-    }
-  });
-  supportPanel?.addEventListener('click', (event) => event.stopPropagation());
   openTutorialButton?.addEventListener('click', () => {
-    setWebSearchToggleState(Boolean(state.settings?.autoWebSearch ?? true));
     if (tutorialDismissCheckbox) {
       tutorialDismissCheckbox.checked = Boolean(state.settings?.showTutorial ?? true);
     }
@@ -912,9 +1070,6 @@ function registerUIListeners() {
       if (!tutorialOverlay?.classList.contains('hidden')) {
         dismissTutorial();
       }
-      if (supportOverlay && !supportOverlay.classList.contains('hidden')) {
-        closeSupportPopover();
-      }
     }
   });
 }
@@ -928,17 +1083,25 @@ async function loadSettings() {
     state.settings = state.settings || { ...DEFAULT_SETTINGS };
   }
 
+  const enforced = {};
+  if (state.settings.autoWebSearch !== DEFAULT_SETTINGS.autoWebSearch) {
+    state.settings.autoWebSearch = DEFAULT_SETTINGS.autoWebSearch;
+    enforced.autoWebSearch = DEFAULT_SETTINGS.autoWebSearch;
+  }
+  if (state.settings.searchResultLimit !== DEFAULT_SETTINGS.searchResultLimit) {
+    state.settings.searchResultLimit = DEFAULT_SETTINGS.searchResultLimit;
+    enforced.searchResultLimit = DEFAULT_SETTINGS.searchResultLimit;
+  }
+  if (Object.keys(enforced).length) {
+    await applySettingsUpdate(enforced);
+  }
+
   await setShareAnalyticsPreference(state.settings.shareAnalytics !== false);
   applySettingsToUI();
 }
 
 function applySettingsToUI() {
   const prefs = state.settings || DEFAULT_SETTINGS;
-
-  if (autoWebSearchToggle) {
-    autoWebSearchToggle.checked = Boolean(prefs.autoWebSearch);
-  }
-  setWebSearchToggleState(Boolean(prefs.autoWebSearch));
 
   if (shareAnalyticsToggle) {
     shareAnalyticsToggle.checked = prefs.shareAnalytics !== false;
@@ -949,12 +1112,6 @@ function applySettingsToUI() {
   if (ollamaEndpointInput) {
     ollamaEndpointInput.value = prefs.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
   }
-
-  const limit = clampSearchLimitForUI(prefs.searchResultLimit);
-  if (searchResultLimitInput) {
-    searchResultLimitInput.value = String(limit);
-  }
-  updateSearchResultLabel(limit);
 
   if (themeSelect) {
     themeSelect.value = prefs.theme || 'system';
@@ -983,7 +1140,6 @@ function applySettingsToUI() {
 }
 
 function openSettingsPanel() {
-  closeSupportPopover();
   applySettingsToUI();
   settingsOverlay.classList.remove('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'false');
@@ -1021,16 +1177,10 @@ async function applySettingsUpdate(partial) {
   }
 }
 
-function setWebSearchToggleState(enabled) {
-  state.settings = state.settings || { ...DEFAULT_SETTINGS };
-  state.settings.autoWebSearch = Boolean(enabled);
-}
-
 function openTutorial() {
   if (!tutorialOverlay || !tutorialPanel) {
     return;
   }
-  closeSupportPopover();
   if (tutorialDismissCheckbox) {
     tutorialDismissCheckbox.checked = state.settings?.showTutorial !== false;
   }
@@ -1048,7 +1198,6 @@ function dismissTutorial(shouldPersist = true) {
   if (!tutorialOverlay) {
     return;
   }
-  closeSupportPopover();
   if (shouldPersist && tutorialDismissCheckbox) {
     const shouldShow = tutorialDismissCheckbox.checked;
     state.skipTutorialOnce = shouldShow;
@@ -1062,65 +1211,6 @@ function dismissTutorial(shouldPersist = true) {
   tutorialOverlay.setAttribute('aria-hidden', 'true');
   tutorialPanel?.setAttribute('tabindex', '');
   document.body.classList.remove('tutorial-open');
-}
-
-function toggleSupportPopover(event) {
-  if (event) {
-    event.stopPropagation();
-  }
-  if (!supportOverlay || !supportButton) {
-    return;
-  }
-  const shouldOpen = supportOverlay.classList.contains('hidden');
-  if (shouldOpen) {
-    supportOverlay.classList.remove('hidden');
-    supportOverlay.setAttribute('aria-hidden', 'false');
-    supportButton.classList.add('active');
-    supportButton.setAttribute('aria-expanded', 'true');
-    document.body.classList.add('support-open');
-    if (supportPanel) {
-      supportPanel.setAttribute('tabindex', '-1');
-      if (typeof supportPanel.focus === 'function') {
-        try {
-          supportPanel.focus({ preventScroll: true });
-        } catch (err) {
-          supportPanel.focus();
-        }
-      }
-    }
-  } else {
-    closeSupportPopover();
-  }
-}
-
-function closeSupportPopover() {
-  if (!supportOverlay || !supportButton) {
-    return;
-  }
-  if (supportOverlay.classList.contains('hidden')) {
-    return;
-  }
-  supportOverlay.classList.add('hidden');
-  supportOverlay.setAttribute('aria-hidden', 'true');
-  supportButton.classList.remove('active');
-  supportButton.setAttribute('aria-expanded', 'false');
-  document.body.classList.remove('support-open');
-  supportPanel?.setAttribute('tabindex', '');
-  if (typeof supportButton.focus === 'function') {
-    supportButton.focus();
-  }
-}
-
-function updateSearchResultLabel(value) {
-  if (!searchResultValue) {
-    return;
-  }
-  searchResultValue.textContent = String(clampSearchLimitForUI(value));
-}
-
-function clampSearchLimitForUI(value) {
-  const numeric = Number.isFinite(Number(value)) ? Number(value) : DEFAULT_SETTINGS.searchResultLimit;
-  return Math.max(1, Math.min(12, Math.round(numeric)));
 }
 
 function registerStreamHandlers() {
@@ -1232,7 +1322,12 @@ function registerStreamHandlers() {
         const status = deriveStatus(
           hasContext ? 'Reviewing gathered context…' : 'No additional context used.'
         );
-        entry.setSummary(status);
+        const hasDeepResearch =
+          data.deepResearch &&
+          (data.deepResearch.summary ||
+            data.deepResearch.answer ||
+            (Array.isArray(data.deepResearch.sources) && data.deepResearch.sources.length > 0));
+        entry.setSummary(hasDeepResearch ? 'Deep research notes & timing' : status);
         entry.setLoadingStatus?.(status);
         entry.setThought(
           formatContextThought({
@@ -1261,6 +1356,584 @@ function registerStreamHandlers() {
         break;
     }
   });
+
+  window.api.onDeepResearchProgress((payload) => {
+    handleDeepResearchProgress(payload);
+  });
+}
+
+function toggleDeepResearchEnabled() {
+  if (state.isStreaming || state.deepResearch.running) {
+    showToast('Finish the current response before changing deep research.', { variant: 'info' });
+    return;
+  }
+
+  const nextEnabled = !state.deepResearch.enabled;
+  state.deepResearch = {
+    ...state.deepResearch,
+    enabled: nextEnabled,
+    chatId: state.currentChatId || state.deepResearch.chatId,
+  };
+  updateDeepResearchButtons();
+
+}
+
+async function runDeepResearchSequence(topicSource, model) {
+  const topicInput = typeof topicSource === 'string' ? topicSource.trim() : '';
+  const topic = topicInput || resolveDeepResearchTopic(topicInput);
+  if (!topic) {
+    return null;
+  }
+
+  const requestId = createRequestId();
+  const primaryGoal = resolveChatPrimaryGoal();
+  state.deepResearch = {
+    ...state.deepResearch,
+    running: true,
+    requestId,
+    chatId: state.currentChatId,
+    topic,
+    stage: 'planning',
+    message: 'Planning multi-pass web research…',
+    summary: '',
+    sources: [],
+    timeline: [],
+    iteration: 0,
+    totalIterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+    error: null,
+    statusLine: '',
+    answer: '',
+    log: [],
+    primaryGoal,
+  };
+  updateDeepResearchShelf();
+  updateDeepResearchButtons();
+  updateInteractivity();
+  updateDeepResearchLiveOutput();
+
+  trackAnalyticsEvent('deep_research_started', {
+    chat_id: state.currentChatId,
+    topic_chars: topic.length,
+    iterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+    mode: 'pre-send-toggle',
+  });
+
+  try {
+    const response = await window.api.deepResearch({
+      chatId: state.currentChatId,
+      topic,
+      requestId,
+      iterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+      model,
+      initialGoal: primaryGoal,
+    });
+
+    if (response?.error) {
+      throw new Error(response.error);
+    }
+
+    const normalized = {
+      summary: response.summary || '',
+      sources: Array.isArray(response.sources) ? response.sources : [],
+      timeline: Array.isArray(response.timeline) ? response.timeline : [],
+      iterations: Number(response.iterations) || DEFAULT_DEEP_RESEARCH_ITERATIONS,
+      answer: typeof response.answer === 'string' ? response.answer.trim() : '',
+    };
+
+    state.deepResearch = {
+      ...state.deepResearch,
+      running: false,
+      requestId: null,
+      stage: 'complete',
+      message: 'Deep research ready to review.',
+      summary: normalized.summary,
+      sources: normalized.sources,
+    timeline: normalized.timeline.map((entry) => ({
+      ...entry,
+      status: entry.status || 'complete',
+    })),
+    error: null,
+    answer: normalized.answer,
+    statusLine: '',
+    log: [],
+    primaryGoal,
+  };
+    updateDeepResearchShelf();
+    trackAnalyticsEvent('deep_research_completed', {
+      chat_id: state.currentChatId,
+      iterations: normalized.iterations,
+      sources: normalized.sources.length,
+      mode: 'pre-send-toggle',
+    });
+    return normalized;
+  } catch (err) {
+    console.error('Deep research failed:', err);
+    const message = err?.message || 'Unable to complete deep research right now.';
+    state.deepResearch = {
+      ...state.deepResearch,
+      running: false,
+      requestId: null,
+      error: message,
+      message,
+      statusLine: '',
+      log: [],
+      answer: '',
+      primaryGoal,
+    };
+    updateDeepResearchShelf();
+    showToast(message, { variant: 'warning' });
+    trackAnalyticsEvent('deep_research_failed', {
+      chat_id: state.currentChatId,
+      reason: String(message).slice(0, 120),
+      mode: 'pre-send-toggle',
+    });
+    return null;
+  } finally {
+    updateInteractivity();
+  }
+}
+
+function resolveDeepResearchTopic(fallbackPrompt) {
+  const candidate =
+    typeof fallbackPrompt === 'string' && fallbackPrompt.trim()
+      ? fallbackPrompt.trim()
+      : typeof promptInput?.value === 'string'
+        ? promptInput.value.trim()
+        : '';
+  const typed = candidate;
+  if (typed) {
+    return typed;
+  }
+  const messages = Array.isArray(state.currentChat?.messages) ? state.currentChat.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === 'user' && typeof message.content === 'string' && message.content.trim()) {
+      return message.content.trim();
+    }
+  }
+  return '';
+}
+
+function resolveChatPrimaryGoal() {
+  if (state.currentChat?.initialUserPrompt && state.currentChat.initialUserPrompt.trim()) {
+    return state.currentChat.initialUserPrompt.trim();
+  }
+  const messages = Array.isArray(state.currentChat?.messages) ? state.currentChat.messages : [];
+  const firstUser = messages.find(
+    (message) => message?.role === 'user' && typeof message.content === 'string' && message.content.trim()
+  );
+  return firstUser ? firstUser.content.trim() : '';
+}
+
+function handleDeepResearchProgress(payload) {
+  if (!payload || !payload.requestId) {
+    return;
+  }
+  if (payload.requestId !== state.deepResearch.requestId) {
+    return;
+  }
+
+  const next = {
+    ...state.deepResearch,
+    stage: payload.stage || state.deepResearch.stage,
+    message: payload.message || state.deepResearch.message,
+    iteration:
+      Number.isFinite(payload.iteration) && payload.iteration > 0
+        ? Number(payload.iteration)
+        : state.deepResearch.iteration,
+    totalIterations:
+      Number.isFinite(payload.totalIterations) && payload.totalIterations > 0
+        ? Number(payload.totalIterations)
+        : state.deepResearch.totalIterations,
+    lastUpdated: Date.now(),
+    log: appendDeepResearchLog(state.deepResearch.log, payload),
+  };
+  if (typeof payload.answer === 'string' && payload.answer.trim()) {
+    next.answer = payload.answer.trim();
+  }
+
+  if (
+    payload.stage === 'iteration-start' ||
+    payload.stage === 'iteration-review' ||
+    payload.stage === 'iteration-error' ||
+    payload.stage === 'iteration-reflection' ||
+    payload.stage === 'model-draft' ||
+    payload.stage === 'model-eval' ||
+    payload.stage === 'model-error' ||
+    (Array.isArray(payload.findings) && payload.findings.length)
+  ) {
+    next.timeline = upsertDeepResearchTimelineEntry(next.timeline, {
+      iteration: Number(payload.iteration),
+      query: payload.query,
+      findings: Array.isArray(payload.findings) ? payload.findings : undefined,
+      statusStage: payload.stage,
+      message: payload.message,
+      review: payload.review,
+      answer: payload.answer,
+      verdict: payload.verdict,
+      reviewNotes: payload.reviewNotes,
+    });
+  }
+
+  if (payload.stage === 'complete') {
+    next.running = false;
+    next.error = null;
+    if (payload.summary) {
+      next.summary = payload.summary;
+    }
+    if (Array.isArray(payload.sources)) {
+      next.sources = payload.sources;
+    }
+  } else if (payload.stage === 'error') {
+    next.running = false;
+    next.error = payload.message || 'Deep research failed.';
+  }
+
+  next.statusLine = next.running ? formatDeepResearchStatusLine(payload, next) : '';
+
+  state.deepResearch = next;
+  updateDeepResearchShelf();
+  updateInteractivity();
+  updateDeepResearchLiveOutput();
+  syncDeepResearchStatusLine();
+}
+
+function upsertDeepResearchTimelineEntry(timeline = [], update = {}) {
+  if (!Number.isFinite(update.iteration)) {
+    return Array.isArray(timeline) ? timeline : [];
+  }
+  const list = Array.isArray(timeline) ? [...timeline] : [];
+  const iteration = Number(update.iteration);
+  const index = list.findIndex((entry) => entry.iteration === iteration);
+  const existing = index >= 0 ? list[index] : null;
+
+  const preserveMessage = update.statusStage === 'iteration-reflection';
+  const entry = {
+    iteration,
+    query: update.query || existing?.query || '',
+    findings: Array.isArray(update.findings)
+      ? update.findings.slice(0, 3)
+      : existing?.findings || [],
+    status: mapDeepResearchStageToStatus(update.statusStage, existing?.status),
+    message: preserveMessage ? existing?.message || '' : update.message || existing?.message || '',
+    review: existing?.review || '',
+    answer: existing?.answer || '',
+    verdict: existing?.verdict || '',
+    reviewNotes: existing?.reviewNotes || '',
+  };
+
+  if (typeof update.review === 'string' && update.review.trim()) {
+    entry.review = update.review.trim();
+  }
+  if (typeof update.answer === 'string' && update.answer.trim()) {
+    entry.answer = update.answer.trim();
+  }
+  if (typeof update.verdict === 'string' && update.verdict.trim()) {
+    entry.verdict = update.verdict.trim();
+  }
+  if (typeof update.reviewNotes === 'string' && update.reviewNotes.trim()) {
+    entry.reviewNotes = update.reviewNotes.trim();
+  }
+
+  if (index >= 0) {
+    list[index] = entry;
+  } else {
+    list.push(entry);
+  }
+
+  list.sort((a, b) => a.iteration - b.iteration);
+  return list;
+}
+
+function mapDeepResearchStageToStatus(stage, fallback = 'pending') {
+  switch (stage) {
+    case 'iteration-start':
+      return 'active';
+    case 'iteration-review':
+    case 'iteration-reflection':
+    case 'model-eval':
+      return 'complete';
+    case 'iteration-error':
+    case 'model-error':
+      return 'error';
+    case 'model-draft':
+      return 'active';
+    default:
+      return fallback || 'pending';
+  }
+}
+
+function updateDeepResearchShelf() {
+  if (!deepResearchShelf) {
+    return;
+  }
+
+  const hasContent =
+    state.deepResearch.running ||
+    Boolean(state.deepResearch.summary) ||
+    Boolean(state.deepResearch.error) ||
+    (Array.isArray(state.deepResearch.timeline) && state.deepResearch.timeline.length > 0);
+
+  if (!hasContent) {
+    deepResearchShelf.classList.add('hidden');
+    renderDeepResearchTimeline();
+    renderDeepResearchSummary();
+    updateDeepResearchButtons();
+    updateDeepResearchDetailsVisibility();
+    return;
+  }
+
+  deepResearchShelf.classList.remove('hidden');
+  if (deepResearchHeadline) {
+    deepResearchHeadline.textContent = state.deepResearch.running
+      ? formatDeepResearchHeadline(state.deepResearch.topic)
+      : 'Deep research ready';
+  }
+  if (deepResearchStageLabel) {
+    if (state.deepResearch.error) {
+      deepResearchStageLabel.textContent = state.deepResearch.error;
+    } else if (state.deepResearch.message) {
+      deepResearchStageLabel.textContent = state.deepResearch.message;
+    } else if (state.deepResearch.running) {
+      deepResearchStageLabel.textContent = 'Gathering multi-source evidence…';
+    } else {
+      deepResearchStageLabel.textContent = 'Review findings before sending.';
+    }
+  }
+
+  renderDeepResearchTimeline();
+  renderDeepResearchSummary();
+  updateDeepResearchButtons();
+}
+
+function renderDeepResearchTimeline() {
+  if (!deepResearchTimeline) {
+    return;
+  }
+  deepResearchTimeline.innerHTML = '';
+  const entries = Array.isArray(state.deepResearch.timeline) ? state.deepResearch.timeline : [];
+  if (!entries.length) {
+    deepResearchTimeline.classList.add('hidden');
+    updateDeepResearchDetailsVisibility();
+    return;
+  }
+  deepResearchTimeline.classList.remove('hidden');
+  entries.forEach((entry) => {
+    const item = document.createElement('li');
+    item.classList.add(entry.status || 'pending');
+
+    const title = document.createElement('strong');
+    const iterationLabel = Number.isFinite(entry.iteration) ? entry.iteration : '–';
+    title.textContent = `Pass ${iterationLabel}`;
+    item.appendChild(title);
+
+    const meta = document.createElement('small');
+    const messageParts = [];
+    if (entry.query) {
+      messageParts.push(`Query: ${entry.query}`);
+    }
+    if (entry.message) {
+      messageParts.push(entry.message);
+    }
+    meta.textContent = messageParts.join(' • ');
+    item.appendChild(meta);
+
+    if (Array.isArray(entry.findings) && entry.findings.length) {
+      const list = document.createElement('ul');
+      list.classList.add('deep-research-findings');
+      entry.findings.slice(0, 2).forEach((finding) => {
+        const li = document.createElement('li');
+        const label = finding.title || finding.summary || finding.url || 'Source';
+        li.textContent = label;
+        list.appendChild(li);
+      });
+      item.appendChild(list);
+    }
+
+    if (entry.review) {
+      const review = document.createElement('p');
+      review.classList.add('deep-research-review');
+      review.textContent = entry.review;
+      item.appendChild(review);
+    }
+
+    if (entry.answer) {
+      const draft = document.createElement('p');
+      draft.classList.add('deep-research-draft');
+      draft.textContent =
+        entry.answer.length > 320 ? `${entry.answer.slice(0, 317)}…` : entry.answer;
+      item.appendChild(draft);
+    }
+
+    if (entry.verdict || entry.reviewNotes) {
+      const verdict = document.createElement('p');
+      verdict.classList.add('deep-research-verdict');
+      if (entry.verdict === 'good') {
+        verdict.classList.add('approved');
+      } else if (entry.verdict) {
+        verdict.classList.add('needs-work');
+      }
+      verdict.textContent = entry.reviewNotes
+        ? `Reviewer: ${entry.reviewNotes}`
+        : entry.verdict
+          ? `Reviewer verdict: ${entry.verdict}`
+          : 'Reviewer feedback recorded.';
+      item.appendChild(verdict);
+    }
+
+    deepResearchTimeline.appendChild(item);
+  });
+  if (deepResearchDetails && state.deepResearch.running) {
+    deepResearchDetails.open = true;
+  }
+  updateDeepResearchDetailsVisibility();
+}
+
+function renderDeepResearchSummary() {
+  if (!deepResearchSummaryCard || !deepResearchSummaryText) {
+    return;
+  }
+  const summaryText = buildDeepResearchSummaryDisplay();
+  const hasSummary = Boolean(summaryText);
+  if (!hasSummary) {
+    deepResearchSummaryCard.classList.add('hidden');
+    deepResearchSummaryText.textContent = '';
+    if (deepResearchInsertButton) {
+      deepResearchInsertButton.disabled = true;
+    }
+    if (deepResearchCopyButton) {
+      deepResearchCopyButton.disabled = true;
+    }
+    updateDeepResearchDetailsVisibility();
+    return;
+  }
+
+  deepResearchSummaryCard.classList.remove('hidden');
+  deepResearchSummaryText.textContent = summaryText;
+  if (deepResearchInsertButton) {
+    deepResearchInsertButton.disabled = false;
+  }
+  if (deepResearchCopyButton) {
+    deepResearchCopyButton.disabled = false;
+  }
+  updateDeepResearchDetailsVisibility();
+}
+
+function updateDeepResearchDetailsVisibility() {
+  if (!deepResearchDetails) {
+    return;
+  }
+  const timelineVisible = deepResearchTimeline && !deepResearchTimeline.classList.contains('hidden');
+  const summaryVisible = deepResearchSummaryCard && !deepResearchSummaryCard.classList.contains('hidden');
+  const shouldShow = timelineVisible || summaryVisible;
+  if (!shouldShow) {
+    deepResearchDetails.classList.add('hidden');
+    deepResearchDetails.open = false;
+  } else {
+    deepResearchDetails.classList.remove('hidden');
+  }
+}
+
+function updateDeepResearchButtons() {
+  const isActive = Boolean(state.deepResearch.enabled);
+  const buttons = [composerDeepResearchButton];
+  buttons.forEach((btn) => {
+    if (!btn) {
+      return;
+    }
+    btn.classList.toggle('is-active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+function formatDeepResearchHeadline(topic) {
+  const trimmed = typeof topic === 'string' ? topic.trim() : '';
+  if (!trimmed) {
+    return 'Deep research';
+  }
+  if (trimmed.length <= 52) {
+    return `Deep research on "${trimmed}"`;
+  }
+  return `Deep research on "${trimmed.slice(0, 49)}..."`;
+}
+
+async function handleDeepResearchCopy() {
+  const summary = buildDeepResearchSummaryDisplay();
+  if (!summary) {
+    return;
+  }
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(summary);
+    } else {
+      throw new Error('Clipboard API unavailable');
+    }
+    showToast('Deep research summary copied.', { variant: 'info' });
+  } catch (err) {
+    try {
+      const fallback = document.createElement('textarea');
+      fallback.value = summary;
+      fallback.setAttribute('readonly', '');
+      fallback.style.position = 'absolute';
+      fallback.style.left = '-9999px';
+      document.body.appendChild(fallback);
+      fallback.select();
+      document.execCommand('copy');
+      document.body.removeChild(fallback);
+      showToast('Deep research summary copied.', { variant: 'info' });
+    } catch (copyError) {
+      console.error('Failed to copy deep research summary:', copyError);
+      showToast('Copy failed. Select the findings text manually.', { variant: 'warning' });
+    }
+  }
+}
+
+function handleDeepResearchInsert() {
+  const payload = buildDeepResearchSummaryDisplay();
+  if (!promptInput || !payload) {
+    return;
+  }
+  const block = `[Deep Research Findings]\n${payload}`;
+  const existing = typeof promptInput.value === 'string' ? promptInput.value.trimEnd() : '';
+  promptInput.value = existing ? `${existing}\n\n${block}\n` : `${block}\n`;
+  promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+  promptInput.focus();
+  showToast('Inserted deep research findings into the prompt.', { variant: 'info' });
+}
+
+function buildDeepResearchSummaryDisplay() {
+  const parts = [];
+  if (state.deepResearch.answer && state.deepResearch.answer.trim()) {
+    parts.push(`Preliminary response:\n${state.deepResearch.answer.trim()}`);
+  }
+  if (state.deepResearch.summary && state.deepResearch.summary.trim()) {
+    parts.push(state.deepResearch.summary.trim());
+  }
+  return parts.join('\n\n').trim();
+}
+
+function dismissDeepResearchShelf() {
+  if (state.deepResearch.running) {
+    return;
+  }
+  const enabled = Boolean(state.deepResearch.enabled);
+  const chatId = state.deepResearch.chatId || null;
+  state.deepResearch = { ...createDeepResearchState(), enabled, chatId };
+  updateDeepResearchShelf();
+  updateDeepResearchButtons();
+  updateInteractivity();
+}
+
+function maybeResetDeepResearchForChat(chatId) {
+  if (!chatId) {
+    return;
+  }
+  if (state.deepResearch.chatId === chatId) {
+    return;
+  }
+  state.deepResearch = { ...createDeepResearchState(), chatId };
+  updateDeepResearchButtons();
+  updateDeepResearchShelf();
 }
 
 async function populateModels() {
@@ -1353,6 +2026,7 @@ async function handlePromptSubmit() {
     model,
     prompt_chars: prompt.length,
     attachments: state.attachments.length,
+    deep_research_enabled: Boolean(state.deepResearch.enabled),
   });
 
   state.isStreaming = true;
@@ -1375,6 +2049,7 @@ async function handlePromptSubmit() {
     loading: true,
     loadingStatus: 'Loading model…',
   });
+  let cancelRequested = false;
 
   const stopButton = document.createElement('button');
   stopButton.type = 'button';
@@ -1387,6 +2062,7 @@ async function handlePromptSubmit() {
     }
     stopButton.disabled = true;
     stopButton.textContent = 'Stopping…';
+    cancelRequested = true;
     stopGeneration(requestId).catch((err) => {
       console.error('Failed to cancel generation:', err);
       stopButton.disabled = false;
@@ -1401,6 +2077,25 @@ async function handlePromptSubmit() {
   state.activeAssistantEntry = assistantEntry;
 
   try {
+    let deepResearchPayload = null;
+    if (state.deepResearch.enabled) {
+      deepResearchPayload = await runDeepResearchSequence(prompt, model);
+    }
+
+    if (cancelRequested) {
+      assistantEntry.clearActions();
+      assistantEntry.stopLoading?.();
+      assistantEntry.setSummary('Canceled');
+      state.pendingAssistantByChat.delete(chatId);
+      state.isStreaming = false;
+      state.activeRequestId = null;
+      state.activeAssistantEntry = null;
+      updateInteractivity();
+      stopAttachmentStatusTimer();
+      renderAttachmentList();
+      return;
+    }
+
     const result = await window.api.askOllama({
       chatId,
       model,
@@ -1408,6 +2103,7 @@ async function handlePromptSubmit() {
       requestId,
       userLinks,
       attachments: attachmentsPayload,
+      deepResearch: deepResearchPayload,
     });
 
     assistantEntry.clearActions();
@@ -1445,19 +2141,26 @@ async function handlePromptSubmit() {
 
     const reasoningText = result.reasoning?.trim() || '';
     const hasContext = Boolean(result.context);
-    const contextSummary = hasContext ? 'Web Context' : 'Context';
+    const usesDeepResearch =
+      result.deepResearch &&
+      (result.deepResearch.summary ||
+        result.deepResearch.answer ||
+        (Array.isArray(result.deepResearch.sources) && result.deepResearch.sources.length > 0));
+    const contextSummary = usesDeepResearch ? 'Deep research notes & timing' : hasContext ? 'Web Context' : 'Context';
 
     assistantEntry.setSummary(contextSummary);
     if (reasoningText) {
       assistantEntry.setReasoning(reasoningText);
     }
-    const contextMessage = result.usedWebSearch
-      ? 'Web search context applied to compose the answer.'
-      : result.reusedConversationMemory
-        ? 'Relied on earlier conversation and cached context.'
-        : result.context
-          ? 'Included user-provided references.'
-          : 'No additional context used.';
+    const contextMessage = usesDeepResearch
+      ? 'Deep research findings captured before this response.'
+      : result.usedWebSearch
+        ? 'Web search context applied to compose the answer.'
+        : result.reusedConversationMemory
+          ? 'Relied on earlier conversation and cached context.'
+          : result.context
+            ? 'Included user-provided references.'
+            : 'No additional context used.';
     assistantEntry.setThought(
       formatContextThought({
         message: contextMessage,
@@ -1495,6 +2198,7 @@ async function handlePromptSubmit() {
         attachmentWarnings: result.attachmentWarnings,
         timing: result.timing,
         supportsReasoning: result.supportsReasoning,
+        deepResearch: result.deepResearch,
       },
       model
     );
@@ -1542,11 +2246,13 @@ async function handleNewChat() {
     model: chat.model,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
+    initialUserPrompt: chat.initialUserPrompt || '',
   });
   renderChatList(chat.id);
   stopAttachmentStatusTimer();
   setCurrentChatAttachments(chat.attachments || [], { persist: false });
   renderChat(chat);
+  maybeResetDeepResearchForChat(chat.id);
   promptInput.focus();
   trackAnalyticsEvent('chat_created', {
     chat_count: state.chats.length,
@@ -1574,6 +2280,7 @@ async function selectChat(chatId) {
   stopAttachmentStatusTimer();
   setCurrentChatAttachments(chat.attachments || [], { persist: false });
   renderChat(chat);
+  maybeResetDeepResearchForChat(chat.id);
 }
 
 function renderChat(chat) {
@@ -1583,9 +2290,10 @@ function renderChat(chat) {
     const empty = document.createElement('div');
     empty.classList.add('empty-state');
     empty.innerHTML = `
-      <h2 class="empty-title">DioxideAi</h2>
-      <p>Start a conversation by selecting a model and asking a question.</p>
-      <small>Your chats are private and only stored on your device.</small>
+      <div class="empty-copy">
+        <h2>Ready when you are</h2>
+        <p>Select a model, drop in context, then ask anything. Your conversations stay on this device.</p>
+      </div>
     `;
     chatArea.appendChild(empty);
     return;
@@ -1597,11 +2305,16 @@ function renderChat(chat) {
       appendUserMessage(message.content);
     } else {
       const usedWeb = Boolean(message.meta?.usedWebSearch);
+      const usedDeepResearch =
+        message.meta?.deepResearch &&
+        (message.meta.deepResearch.summary ||
+          message.meta.deepResearch.answer ||
+          (Array.isArray(message.meta.deepResearch.sources) && message.meta.deepResearch.sources.length > 0));
       const storedThought = formatStoredContext(message.meta || {});
       const entry = appendAssistantMessage(message.content, {
         open: state.settings?.openThoughtsByDefault ?? false,
         thoughts: storedThought.context,
-        summary: usedWeb ? 'Web Context' : 'Context',
+        summary: usedDeepResearch ? 'Deep research notes & timing' : usedWeb ? 'Web Context' : 'Context',
       });
       if (storedThought.reasoning) {
         entry.setReasoning(storedThought.reasoning);
@@ -1649,6 +2362,7 @@ function renderChatList(activeId) {
 }
 
 function appendUserMessage(content) {
+  removeEmptyState();
   const container = document.createElement('div');
   container.classList.add('message', 'user');
 
@@ -1663,6 +2377,7 @@ function appendUserMessage(content) {
 }
 
 function appendAssistantMessage(content, options = {}) {
+  removeEmptyState();
   const openDefault = state.settings?.openThoughtsByDefault ?? false;
   const {
     open = openDefault,
@@ -1863,6 +2578,13 @@ function recordUserMessage(content) {
     content,
     createdAt: new Date().toISOString(),
   });
+  if (!state.currentChat.initialUserPrompt) {
+    state.currentChat.initialUserPrompt = content;
+    const summary = state.chats.find((chat) => chat.id === state.currentChatId);
+    if (summary) {
+      summary.initialUserPrompt = content;
+    }
+  }
   if (!state.currentChat.title || state.currentChat.title === 'New Chat') {
     state.currentChat.title = truncate(content, 60);
     const summary = state.chats.find((chat) => chat.id === state.currentChatId);
@@ -1922,6 +2644,10 @@ function recordAssistantMessage(content, contextData, model) {
     meta.attachmentWarnings = contextData.attachmentWarnings;
   }
 
+  if (contextData?.deepResearch) {
+    meta.deepResearch = contextData.deepResearch;
+  }
+
   state.currentChat.messages.push({
     role: 'assistant',
     content,
@@ -1972,6 +2698,9 @@ function updateInteractivity() {
   }
   if (deleteAllChatsButton) {
     deleteAllChatsButton.disabled = state.isStreaming;
+  }
+  if (composerDeepResearchButton) {
+    composerDeepResearchButton.disabled = state.isStreaming;
   }
   if (state.isStreaming) {
     chatListNav.classList.add('disabled');
@@ -2134,16 +2863,23 @@ function formatTimingSummary(timing) {
 function formatStoredContext(meta = {}) {
   const hasQueries = Array.isArray(meta.contextQueries) && meta.contextQueries.length > 0;
   const hasLinks = Array.isArray(meta.userLinks) && meta.userLinks.length > 0;
+  const usedDeepResearch =
+    meta.deepResearch &&
+    (meta.deepResearch.summary ||
+      meta.deepResearch.answer ||
+      (Array.isArray(meta.deepResearch.sources) && meta.deepResearch.sources.length > 0));
   let context = meta.context;
 
   if ((!context || !context.trim()) && hasLinks) {
     context = ['User-provided links:', ...meta.userLinks.map((link) => `• ${link}`)].join('\n');
   }
 
-  const message = meta.usedWebSearch
-    ? 'Context used when drafting this reply.'
-    : meta.reusedConversationMemory
-      ? 'Relied on earlier conversation and stored context.'
+  const message = usedDeepResearch
+    ? 'Deep research findings captured before this reply.'
+    : meta.usedWebSearch
+      ? 'Context used when drafting this reply.'
+      : meta.reusedConversationMemory
+        ? 'Relied on earlier conversation and stored context.'
       : hasLinks
         ? 'User-provided links supplied by the user.'
         : hasQueries

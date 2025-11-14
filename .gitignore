@@ -5,6 +5,8 @@
 /dist
 /build/*.app
 /build/*.dmg
+/build/*.exe
+/build/*.zip
 
 # Logs
 npm-debug.log*

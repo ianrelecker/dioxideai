@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 const exposeAPI = {
   getModels: () => ipcRenderer.invoke('fetch-models'),
   askOllama: (payload) => ipcRenderer.invoke('ask-ollama', payload),
+  deepResearch: (payload) => ipcRenderer.invoke('deep-research', payload),
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (settings) => ipcRenderer.invoke('update-settings', settings),
   cancelOllama: (payload) => ipcRenderer.invoke('cancel-ollama', payload),
@@ -35,6 +36,11 @@ const exposeAPI = {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('auto-update-progress', listener);
     return () => ipcRenderer.removeListener('auto-update-progress', listener);
+  },
+  onDeepResearchProgress: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('deep-research-progress', listener);
+    return () => ipcRenderer.removeListener('deep-research-progress', listener);
   },
   initAnalytics: (options) => ipcRenderer.invoke('analytics-init', options),
   setAnalyticsOptOut: (optOut) => ipcRenderer.invoke('analytics-set-opt-out', optOut),

@@ -31,16 +31,6 @@
             Hide Chats
           </button>
           <button
-            id="supportBtn"
-            type="button"
-            aria-haspopup="dialog"
-            aria-expanded="false"
-            aria-controls="supportPanel"
-            aria-label="Support DioxideAi"
-          >
-            ♡
-          </button>
-          <button
             id="settingsBtn"
             type="button"
             aria-haspopup="dialog"
@@ -48,15 +38,60 @@
             aria-controls="settingsPanel"
             aria-label="Open settings"
           >
-            ⚙︎
+            Settings
           </button>
         </div>
       </header>
 
+      <section
+        id="deepResearchShelf"
+        class="deep-research-shelf hidden"
+        aria-live="polite"
+        aria-atomic="false"
+      >
+        <div class="deep-research-status">
+          <div class="deep-research-orb" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="deep-research-status-copy">
+            <strong id="deepResearchHeadline">Deep research ready</strong>
+            <small id="deepResearchStage">Surface multi-pass findings before sending.</small>
+          </div>
+          <button id="deepResearchDismissBtn" type="button" class="deep-research-dismiss">
+            Hide
+          </button>
+        </div>
+        <details
+          id="deepResearchDetails"
+          class="deep-research-details hidden"
+          aria-live="polite"
+          aria-atomic="false"
+        >
+          <summary>View passes & findings</summary>
+          <ol
+            id="deepResearchTimeline"
+            class="deep-research-timeline"
+            aria-label="Deep research passes"
+          ></ol>
+          <div id="deepResearchSummaryCard" class="deep-research-summary hidden">
+            <header>
+              <strong>Findings</strong>
+              <div class="summary-actions">
+                <button id="deepResearchInsertBtn" type="button">Insert into prompt</button>
+                <button id="deepResearchCopyBtn" type="button">Copy</button>
+              </div>
+            </header>
+            <pre id="deepResearchSummaryText"></pre>
+          </div>
+        </details>
+      </section>
+
       <main id="chatArea" role="log" aria-live="polite" aria-label="Chat conversation"></main>
 
       <form id="inputForm" aria-label="Compose message">
-        <section
+        <div
           id="composer"
           class="composer"
           aria-describedby="attachmentHint"
@@ -67,19 +102,26 @@
           </div>
 
           <div class="attachment-toolbar">
-            <div class="attachment-actions">
-              <button
-                type="button"
-                id="attachBtn"
-                class="attachment-button"
-                aria-label="Attach local files"
-              >
-                📎 Attach…
-              </button>
-              <span id="attachmentHint" class="attachment-hint">
-                Up to 4 files • 512 KB each (max 1 MB total, 4,000 chars/file)
-              </span>
-            </div>
+          <div class="attachment-actions">
+            <button
+              type="button"
+              id="composerDeepResearchBtn"
+              class="deep-research-toggle deep-research-trigger"
+              aria-label="Toggle deep research before sending"
+              aria-pressed="false"
+            >
+              <span class="deep-research-flare" aria-hidden="true"></span>
+              Deep Research
+            </button>
+            <button
+              type="button"
+              id="attachBtn"
+              class="attachment-button"
+              aria-label="Attach local files"
+            >
+              Attach file
+            </button>
+          </div>
             <p id="attachmentNotice" class="attachment-notice" role="status" aria-live="polite"></p>
           </div>
 
@@ -99,7 +141,7 @@
             ></textarea>
             <button type="submit" id="sendBtn">Send</button>
           </div>
-        </section>
+        </div>
       </form>
     </section>
   </div>
@@ -120,25 +162,6 @@
       </header>
 
       <form id="settingsForm">
-        <fieldset>
-          <legend>Context Retrieval</legend>
-          <label class="setting-toggle">
-            <input type="checkbox" id="autoWebSearchToggle" />
-            <span>
-              <strong>Automatic web search</strong>
-              <small>Enrich prompts with fresh snippets from DuckDuckGo.</small>
-            </span>
-          </label>
-
-          <label class="setting-range">
-            <div>
-              <strong>Max search results per prompt</strong>
-              <small>Number of snippets to collect (1-12): <span id="searchResultValue">10</span></small>
-            </div>
-            <input type="range" id="searchResultLimit" min="1" max="12" step="1" value="10" />
-          </label>
-        </fieldset>
-
         <fieldset>
           <legend>Connection</legend>
           <label class="setting-text" for="ollamaEndpointInput">
@@ -177,37 +200,6 @@
           </label>
         </fieldset>
       </form>
-    </section>
-  </div>
-
-  <div id="supportOverlay" class="support-overlay hidden" aria-hidden="true">
-    <div class="support-backdrop"></div>
-    <section
-      id="supportPanel"
-      class="support-panel"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="supportTitle"
-      tabindex="-1"
-    >
-      <header class="support-header">
-        <h2 id="supportTitle">Support DioxideAi</h2>
-        <button id="supportCloseBtn" type="button" aria-label="Close support panel">✕</button>
-      </header>
-      <div class="support-card">
-        <strong>Enjoying DioxideAi?</strong>
-        <p>
-          This is a WinRAR-style project: totally free, but tips keep it going. If it saves you time,
-          you can scan or copy the BTC address below, or visit
-          <a href="https://relecker.com" target="_blank" rel="noopener noreferrer">relecker.com</a>.
-        </p>
-        <div class="support-details">
-          <div class="support-address">
-            <span>BTC</span>
-            <code>bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068</code>
-          </div>
-        </div>
-      </div>
     </section>
   </div>
 
