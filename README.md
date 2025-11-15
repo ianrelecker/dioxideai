@@ -1,6 +1,6 @@
 # DioxideAi
 
-DioxideAi is a desktop LLM chat client that automatically augments every prompt with live DuckDuckGo context. Version 2 ships a revamped support dialog, per-install analytics, and a configurable Ollama or ChatGPT compatible API endpoint for remote servers.
+DioxideAi is a desktop LLM chat client that automatically augments every prompt with live DuckDuckGo context. Version 3 ships a revamped support dialog, per-install analytics, and a configurable Ollama or ChatGPT compatible API endpoint for remote servers.
 
 ## Highlights
 
