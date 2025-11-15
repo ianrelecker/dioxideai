@@ -6,7 +6,7 @@
   <title>DioxideAi</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body>
+<body class="sidebar-collapsed">
   <div class="app-shell">
     <aside id="sidebar" aria-label="Saved chats">
       <nav id="chatList" aria-label="Chat history"></nav>
@@ -18,9 +18,7 @@
           <button id="newChatBtn" type="button" aria-label="Start new chat">+ New Chat</button>
           <label for="modelSelect">Model:</label>
           <select id="modelSelect" aria-label="DioxideAi model selector"></select>
-          <button id="refreshModels" type="button" aria-label="Refresh models list">↻</button>
         </div>
-        <div id="chatTitle" aria-live="polite"></div>
         <div class="header-actions">
           <button
             id="sidebarToggleBtn"
@@ -137,7 +135,7 @@
               id="promptInput"
               placeholder="Type your question..."
               aria-label="Your prompt"
-              rows="2"
+              rows="1"
             ></textarea>
             <button type="submit" id="sendBtn">Send</button>
           </div>
@@ -166,15 +164,37 @@
           <legend>Connection</legend>
           <label class="setting-text" for="ollamaEndpointInput">
             <span>
-              <strong>Ollama server endpoint</strong>
-              <small>Defaults to http://localhost:11434</small>
+              <strong>Model server endpoint</strong>
+              <small>Defaults to http://localhost:11434 for Ollama. Switch to your llama.cpp or ChatGPT-compatible host as needed.</small>
             </span>
             <input type="url" id="ollamaEndpointInput" inputmode="url" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false" autocapitalize="none" />
           </label>
+          <label class="setting-toggle">
+            <input type="checkbox" id="chatCompatToggle" />
+            <span>
+              <strong>Enable llama.cpp / ChatGPT-compatible API endpoint mode</strong>
+              <small>Use this when your endpoint speaks the ChatGPT (OpenAI) API—e.g., llama.cpp, LM Studio, or other compatible servers.</small>
+            </span>
+          </label>
+          <div class="connection-actions">
+            <button type="button" id="refreshModels" aria-label="Refresh models list">Refresh models</button>
+            <p id="modelStatus" class="model-status" role="status" aria-live="polite">Models not loaded yet.</p>
+          </div>
         </fieldset>
 
         <fieldset>
           <legend>Appearance</legend>
+          <label class="setting-text" for="themeSelect">
+            <span>
+              <strong>Theme</strong>
+              <small>Follow system or force Light/Dark manually.</small>
+            </span>
+            <select id="themeSelect">
+              <option value="system">Match system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
           <label class="setting-toggle">
             <input type="checkbox" id="sidebarCollapseToggle" />
             <span>

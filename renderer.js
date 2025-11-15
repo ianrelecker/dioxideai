@@ -2,10 +2,10 @@ const urlRegex = /https?:\/\/[^\s]+/gi;
 
 let modelSelect;
 let refreshModelsButton;
-let chatTitleEl;
 let chatListNav;
 let newChatButton;
 let chatArea;
+let chatPane;
 let promptInput;
 let inputForm;
 let sendButton;
@@ -33,6 +33,9 @@ let toastHost;
 let shareAnalyticsToggle;
 let tutorialAnalyticsCheckbox;
 let ollamaEndpointInput;
+let chatCompatToggle;
+let modelStatusText;
+let sidebar;
 let deepResearchShelf;
 let deepResearchHeadline;
 let deepResearchStageLabel;
@@ -49,11 +52,12 @@ const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
   searchResultLimit: 10,
-  theme: 'light',
+  theme: 'system',
   sidebarCollapsed: false,
   showTutorial: true,
   shareAnalytics: true,
   ollamaEndpoint: 'http://localhost:11434',
+  useOpenAICompatibleEndpoint: false,
 };
 
 const ATTACHMENT_LIMIT = 1;
@@ -61,6 +65,7 @@ const ATTACHMENT_MAX_FILE_BYTES = 512 * 1024;
 const ATTACHMENT_TOTAL_BYTES = 1024 * 1024;
 const ATTACHMENT_CHAR_LIMIT = 4000;
 const DEFAULT_DEEP_RESEARCH_ITERATIONS = 4;
+const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
 const state = {
   chats: [],
@@ -77,9 +82,23 @@ const state = {
   attachmentBytes: 0,
   attachmentWarnings: [],
   attachmentProcessingStartedAt: null,
-  sidebarCollapsed: false,
+  sidebarCollapsed: true,
   deepResearch: createDeepResearchState(),
 };
+
+if (prefersDark) {
+  const handleSystemThemeChange = () => {
+    const preference = state.settings?.theme || DEFAULT_SETTINGS.theme;
+    if (preference === 'system') {
+      applyTheme('system');
+    }
+  };
+  if (typeof prefersDark.addEventListener === 'function') {
+    prefersDark.addEventListener('change', handleSystemThemeChange);
+  } else if (typeof prefersDark.addListener === 'function') {
+    prefersDark.addListener(handleSystemThemeChange);
+  }
+}
 
 const activeToasts = new Map();
 let toastIdCounter = 0;
@@ -89,8 +108,6 @@ let attachmentStatusTimer = null;
 const ATTACHMENT_STATUS_REFRESH_MS = 1000;
 let analyticsInitialized = false;
 let analyticsReady = false;
-
-const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
 const createRequestId = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
@@ -851,9 +868,9 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   modelSelect = document.getElementById('modelSelect');
   refreshModelsButton = document.getElementById('refreshModels');
-  chatTitleEl = document.getElementById('chatTitle');
   chatListNav = document.getElementById('chatList');
   newChatButton = document.getElementById('newChatBtn');
+  chatPane = document.getElementById('chatPane');
   chatArea = document.getElementById('chatArea');
   promptInput = document.getElementById('promptInput');
   inputForm = document.getElementById('inputForm');
@@ -882,6 +899,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   shareAnalyticsToggle = document.getElementById('shareAnalyticsToggle');
   tutorialAnalyticsCheckbox = document.getElementById('tutorialAnalyticsCheckbox');
   ollamaEndpointInput = document.getElementById('ollamaEndpointInput');
+  chatCompatToggle = document.getElementById('chatCompatToggle');
+  modelStatusText = document.getElementById('modelStatus');
+  updateModelStatus('Models not loaded yet.', 'muted');
+  renderNoModelsPlaceholder();
+  sidebar = document.getElementById('sidebar');
+  document.addEventListener('click', handleSidebarOverlayDismiss);
   composerDeepResearchButton = document.getElementById('composerDeepResearchBtn');
   deepResearchShelf = document.getElementById('deepResearchShelf');
   deepResearchHeadline = document.getElementById('deepResearchHeadline');
@@ -908,6 +931,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     promptInput.focus();
     updateDeepResearchShelf();
     updateDeepResearchButtons();
+    handlePromptAutosize();
   } catch (error) {
     console.error('Initialization failed:', error);
   }
@@ -952,6 +976,7 @@ function registerUIListeners() {
       await handlePromptSubmit();
     }
   });
+  promptInput.addEventListener('input', handlePromptAutosize);
 
   attachButton?.addEventListener('click', async () => {
     if (state.isStreaming) {
@@ -1032,6 +1057,11 @@ function registerUIListeners() {
     await applySettingsUpdate({ ollamaEndpoint: value });
     await populateModels();
   });
+  chatCompatToggle?.addEventListener('change', async () => {
+    const enabled = chatCompatToggle.checked;
+    await applySettingsUpdate({ useOpenAICompatibleEndpoint: enabled });
+    await populateModels();
+  });
 
   deleteAllChatsButton?.addEventListener('click', handleDeleteAllChats);
   openTutorialButton?.addEventListener('click', () => {
@@ -1074,6 +1104,18 @@ function registerUIListeners() {
   });
 }
 
+function handlePromptAutosize() {
+  if (!promptInput) {
+    return;
+  }
+  const lineHeight = parseFloat(window.getComputedStyle(promptInput).lineHeight) || 20;
+  const maxLines = 3;
+  const maxHeight = lineHeight * maxLines;
+  promptInput.style.height = 'auto';
+  const nextHeight = Math.min(promptInput.scrollHeight, maxHeight);
+  promptInput.style.height = `${Math.max(nextHeight, lineHeight + 4)}px`;
+}
+
 async function loadSettings() {
   try {
     const prefs = await window.api.getSettings();
@@ -1112,6 +1154,9 @@ function applySettingsToUI() {
   if (ollamaEndpointInput) {
     ollamaEndpointInput.value = prefs.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
   }
+  if (chatCompatToggle) {
+    chatCompatToggle.checked = Boolean(prefs.useOpenAICompatibleEndpoint);
+  }
 
   if (themeSelect) {
     themeSelect.value = prefs.theme || 'system';
@@ -1121,7 +1166,9 @@ function applySettingsToUI() {
     sidebarCollapseToggle.checked = Boolean(prefs.sidebarCollapsed);
   }
 
-  updateSidebarState(Boolean(prefs.sidebarCollapsed));
+  const collapsed = prefs.sidebarCollapsed !== false;
+  state.sidebarCollapsed = collapsed;
+  updateSidebarState(collapsed);
   applyTheme(prefs.theme || DEFAULT_SETTINGS.theme);
 
   if (tutorialDismissCheckbox) {
@@ -1936,25 +1983,39 @@ function maybeResetDeepResearchForChat(chatId) {
   updateDeepResearchShelf();
 }
 
+function renderNoModelsPlaceholder() {
+  modelSelect.innerHTML = '';
+  const option = document.createElement('option');
+  option.textContent = 'No Models Found';
+  option.value = '';
+  option.disabled = true;
+  option.selected = true;
+  modelSelect.appendChild(option);
+}
+
 async function populateModels() {
   setModelControlsDisabled(true);
   const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  const usingChatCompat = Boolean(state.settings?.useOpenAICompatibleEndpoint);
+  const providerLabel = usingChatCompat ? 'ChatGPT-compatible endpoint' : 'Ollama server';
+  const providerShort = usingChatCompat ? 'ChatGPT-compatible endpoint' : 'Ollama';
+  const providerStatus = usingChatCompat ? 'ChatGPT-compatible API endpoint' : 'Ollama server';
+  updateModelStatus(`Checking ${providerStatus}…`, 'loading');
 
   try {
     const models = await window.api.getModels();
     modelSelect.innerHTML = '';
 
     if (!models.length) {
-      const option = document.createElement('option');
-      option.textContent = `No models detected at ${endpoint}`;
-      option.value = '';
-      option.disabled = true;
-      option.selected = true;
-      modelSelect.appendChild(option);
-      showToast(`No Ollama models detected at ${endpoint}. Start Ollama and refresh.`, {
+      renderNoModelsPlaceholder();
+      const toastMessage = usingChatCompat
+        ? `No models were reported by your ${providerShort} at ${endpoint}. Confirm it exposes /v1/models and refresh.`
+        : `No Ollama models detected at ${endpoint}. Start Ollama and refresh.`;
+      showToast(toastMessage, {
         variant: 'warning',
         duration: 8000,
       });
+      updateModelStatus(`No models detected at ${endpoint}.`, 'warning');
       return;
     }
 
@@ -1964,19 +2025,19 @@ async function populateModels() {
       option.textContent = name;
       modelSelect.appendChild(option);
     });
+    const countLabel = models.length === 1 ? 'model' : 'models';
+    updateModelStatus(`Connected: ${models.length} ${countLabel} available via ${providerStatus}.`, 'success');
   } catch (err) {
     console.error(err);
-    modelSelect.innerHTML = '';
-    const option = document.createElement('option');
-    option.textContent = `Unable to reach Ollama at ${endpoint}`;
-    option.value = '';
-    option.disabled = true;
-    option.selected = true;
-    modelSelect.appendChild(option);
-    showToast(`Unable to reach Ollama at ${endpoint}. Ensure it is running and click refresh.`, {
+    renderNoModelsPlaceholder();
+    const toastMessage = usingChatCompat
+      ? `Unable to reach your ${providerLabel} at ${endpoint}. Make sure it is running and implements the ChatGPT API.`
+      : `Unable to reach Ollama at ${endpoint}. Ensure it is running and click refresh.`;
+    showToast(toastMessage, {
       variant: 'warning',
       duration: 8000,
     });
+    updateModelStatus(`Unable to reach ${providerLabel} at ${endpoint}.`, 'error');
   } finally {
     setModelControlsDisabled(false);
   }
@@ -2208,7 +2269,6 @@ async function handlePromptSubmit() {
     stopAttachmentStatusTimer();
     renderAttachmentList();
     await refreshChatList(chatId);
-    updateChatTitle();
   } catch (err) {
     console.error(err);
     assistantEntry.clearActions();
@@ -2284,7 +2344,6 @@ async function selectChat(chatId) {
 }
 
 function renderChat(chat) {
-  updateChatTitle();
   if (!chat.messages?.length) {
     chatArea.innerHTML = '';
     const empty = document.createElement('div');
@@ -2592,7 +2651,6 @@ function recordUserMessage(content) {
       summary.title = state.currentChat.title;
     }
     renderChatList(state.currentChatId);
-    updateChatTitle();
   }
 }
 
@@ -2664,20 +2722,21 @@ function recordAssistantMessage(content, contextData, model) {
   }
 }
 
-function updateChatTitle() {
-  if (!state.currentChat) {
-    chatTitleEl.textContent = '';
+function updateModelStatus(message, variant = 'info') {
+  if (!modelStatusText) {
     return;
   }
-
-  const title = state.currentChat.title || 'New Chat';
-  const model = state.currentChat.model || modelSelect.value || 'Select a model';
-  chatTitleEl.textContent = `${title} • ${model}`;
+  modelStatusText.textContent = message || '';
+  modelStatusText.setAttribute('data-variant', variant);
 }
 
 function setModelControlsDisabled(disabled) {
-  modelSelect.disabled = disabled;
-  refreshModelsButton.disabled = disabled;
+  if (modelSelect) {
+    modelSelect.disabled = disabled;
+  }
+  if (refreshModelsButton) {
+    refreshModelsButton.disabled = disabled;
+  }
 }
 
 function updateInteractivity() {
@@ -3018,7 +3077,13 @@ function pruneMarkdownWhitespace(root) {
 function updateSidebarState(collapsed) {
   const next = Boolean(collapsed);
   state.sidebarCollapsed = next;
+  if (state.settings) {
+    state.settings.sidebarCollapsed = next;
+  }
   document.body.classList.toggle('sidebar-collapsed', next);
+  if (sidebar) {
+    sidebar.setAttribute('aria-hidden', next ? 'true' : 'false');
+  }
   if (sidebarToggleBtn) {
     sidebarToggleBtn.setAttribute('aria-pressed', String(next));
     sidebarToggleBtn.textContent = next ? 'Show Chats' : 'Hide Chats';
@@ -3028,10 +3093,38 @@ function updateSidebarState(collapsed) {
   }
 }
 
+function handleSidebarOverlayDismiss(event) {
+  if (state.sidebarCollapsed || !sidebar) {
+    return;
+  }
+  const target = event.target;
+  if (sidebar.contains(target)) {
+    return;
+  }
+  if (sidebarToggleBtn?.contains(target)) {
+    return;
+  }
+  updateSidebarState(true);
+}
+
 function applyTheme(themeSetting) {
-  document.body.classList.remove('theme-light', 'theme-dark', 'theme-cream');
+  if (typeof document === 'undefined' || !document.body) {
+    return;
+  }
+  const requested = themeSetting || DEFAULT_SETTINGS.theme;
+  const resolved = resolveTheme(requested);
+  document.body.classList.remove('theme-light', 'theme-dark');
+  document.body.classList.add(`theme-${resolved}`);
+  document.body.dataset.themePreference = requested;
 }
 
 function resolveTheme(themeSetting) {
+  const desired = themeSetting || DEFAULT_SETTINGS.theme;
+  if (desired === 'system') {
+    return prefersDark?.matches ? 'dark' : 'light';
+  }
+  if (desired === 'dark') {
+    return 'dark';
+  }
   return 'light';
 }

@@ -34,6 +34,7 @@ const DEFAULT_SETTINGS = {
   shareAnalytics: true,
   ollamaEndpoint: 'http://localhost:11434',
   analyticsDeviceId: null,
+  useOpenAICompatibleEndpoint: false,
 };
 
 const STORE_FILE = 'dioxideai-chats.json';
@@ -79,7 +80,7 @@ function buildOllamaUrl(pathname) {
   return `${base}${cleanPath}`;
 }
 
-async function chatCompletion(model, messages, options = {}) {
+async function chatCompletion(model, messages, options = {}, effectiveSettingsOverride = null) {
   if (!model || !String(model).trim()) {
     throw new Error('Model is required for chat completion.');
   }
@@ -88,17 +89,25 @@ async function chatCompletion(model, messages, options = {}) {
   }
 
   const timeoutMs = Number.isFinite(options?.timeoutMs) ? Math.max(4000, Number(options.timeoutMs)) : 20000;
+  const effectiveSettings = effectiveSettingsOverride || getEffectiveSettings();
+  const baseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
+  const usingChatCompat = Boolean(effectiveSettings.useOpenAICompatibleEndpoint);
+  const endpointPath = usingChatCompat ? '/v1/chat/completions' : '/api/chat';
   const body = {
     model,
     messages,
     stream: false,
   };
   if (options?.temperature !== undefined) {
-    body.options = { ...(body.options || {}), temperature: options.temperature };
+    if (usingChatCompat) {
+      body.temperature = options.temperature;
+    } else {
+      body.options = { ...(body.options || {}), temperature: options.temperature };
+    }
   }
 
   const response = await fetchWithTimeout(
-    buildOllamaUrl('/api/chat'),
+    `${baseUrl}${endpointPath}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -109,18 +118,24 @@ async function chatCompletion(model, messages, options = {}) {
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
-    throw new Error(
-      `Ollama chat failed (HTTP ${response.status})${errorText ? ` – ${errorText.slice(0, 200)}` : ''}`
-    );
+    const sourceLabel = usingChatCompat ? 'ChatGPT-compatible chat' : 'Ollama chat';
+    throw new Error(`${sourceLabel} failed (HTTP ${response.status})${errorText ? ` – ${errorText.slice(0, 200)}` : ''}`);
   }
 
   const data = await response.json();
-  const content =
-    typeof data?.message?.content === 'string'
-      ? data.message.content
-      : typeof data?.response === 'string'
-        ? data.response
-        : '';
+  const firstChoice = Array.isArray(data?.choices) ? data.choices[0] : null;
+  let content = '';
+  if (typeof data?.message?.content === 'string') {
+    content = data.message.content;
+  } else if (typeof data?.response === 'string') {
+    content = data.response;
+  } else if (usingChatCompat) {
+    if (typeof firstChoice?.message?.content === 'string') {
+      content = firstChoice.message.content;
+    } else if (typeof firstChoice?.delta?.content === 'string') {
+      content = firstChoice.delta.content;
+    }
+  }
 
   return {
     content: typeof content === 'string' ? content.trim() : '',
@@ -702,15 +717,35 @@ ipcMain.handle('update-settings', async (_event, partialSettings) => {
 ipcMain.handle('fetch-models', async () => {
   try {
     await ensureSettingsLoaded();
-    const res = await fetch(buildOllamaUrl('/api/tags'));
+    const effective = getEffectiveSettings();
+    const baseUrl = normalizeOllamaEndpoint(effective.ollamaEndpoint);
+    const usingChatCompat = Boolean(effective.useOpenAICompatibleEndpoint);
+    const endpointPath = usingChatCompat ? '/v1/models' : '/api/tags';
+    const res = await fetch(`${baseUrl}${endpointPath}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
 
     const data = await res.json();
-    const models = Array.isArray(data?.models) ? data.models : [];
+    if (usingChatCompat) {
+      const entries = Array.isArray(data?.data) ? data.data : [];
+      return entries
+        .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : typeof entry?.name === 'string' ? entry.name.trim() : typeof entry?.model === 'string' ? entry.model.trim() : ''))
+        .filter((name) => Boolean(name));
+    }
 
-    return models.map((model) => model.name);
+    const models = Array.isArray(data?.models) ? data.models : [];
+    return models
+      .map((model) => {
+        if (typeof model?.name === 'string') {
+          return model.name.trim();
+        }
+        if (typeof model?.model === 'string') {
+          return model.model.trim();
+        }
+        return '';
+      })
+      .filter((name) => Boolean(name));
   } catch (err) {
     console.error('Error fetching models:', err);
     return [];
@@ -1411,10 +1446,12 @@ ipcMain.handle('ask-ollama', async (
   const searchPrompt = buildSearchPrompt(chat, prompt);
   const focusTerms = deriveFollowUpFocus(chat, prompt);
   const baseHasRecentContext = hasRecentWebContext(chat);
-  const ollamaBaseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
-  const buildOllamaApiUrl = (suffix) => {
+  const modelBaseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
+  const usingChatCompletionsApi = Boolean(effectiveSettings.useOpenAICompatibleEndpoint);
+  const chatEndpointPath = usingChatCompletionsApi ? '/v1/chat/completions' : '/api/chat';
+  const buildModelApiUrl = (suffix) => {
     const cleanPath = suffix && suffix.startsWith('/') ? suffix : `/${suffix || ''}`;
-    return `${ollamaBaseUrl}${cleanPath}`;
+    return `${modelBaseUrl}${cleanPath}`;
   };
   const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt, {
     hasRecentContext: baseHasRecentContext,
@@ -1780,8 +1817,9 @@ ipcMain.handle('ask-ollama', async (
     let checkingDirective = true;
     let searchDirectiveQuery = null;
     let abortedForDirective = false;
+    let streamCompleted = false;
 
-    const response = await fetch(buildOllamaApiUrl('/api/chat'), {
+    const response = await fetch(buildModelApiUrl(chatEndpointPath), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1793,7 +1831,8 @@ ipcMain.handle('ask-ollama', async (
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama API error: HTTP ${response.status}`);
+      const sourceLabel = usingChatCompletionsApi ? 'ChatGPT-compatible API' : 'Ollama API';
+      throw new Error(`${sourceLabel} error: HTTP ${response.status}`);
     }
 
     let buffer = '';
@@ -1833,9 +1872,22 @@ ipcMain.handle('ask-ollama', async (
     const processParsed = (parsed) => {
       const reasoningPayload = parsed?.message?.reasoning ?? parsed?.reasoning ?? null;
       const reasoningDelta = registerReasoningDelta(reasoningPayload);
+      const primaryChoice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
 
-      if (parsed?.message?.content) {
-        let chunkText = parsed.message.content;
+      let chunkText = '';
+      if (typeof parsed?.message?.content === 'string') {
+        chunkText = parsed.message.content;
+      } else if (typeof parsed?.response === 'string') {
+        chunkText = parsed.response;
+      } else if (usingChatCompletionsApi) {
+        if (typeof primaryChoice?.delta?.content === 'string') {
+          chunkText = primaryChoice.delta.content;
+        } else if (typeof primaryChoice?.message?.content === 'string') {
+          chunkText = primaryChoice.message.content;
+        }
+      }
+
+      if (chunkText) {
         if (checkingDirective) {
           directiveBuffer += chunkText;
           const trimmed = directiveBuffer.trim();
@@ -1900,19 +1952,39 @@ ipcMain.handle('ask-ollama', async (
         emitUpdate({ delta: '', done: false, force: true });
       }
 
-    if (parsed?.done) {
-      flushDirectiveBuffer();
-      tStreamEnd = Date.now();
-      emitUpdate({ delta: '', done: true, force: true });
-    }
-  };
+      const finishReasonDetected =
+        Boolean(parsed?.done) ||
+        (Array.isArray(parsed?.choices) && parsed.choices.some((choice) => Boolean(choice?.finish_reason)));
+
+      if (!streamCompleted && finishReasonDetected) {
+        streamCompleted = true;
+        flushDirectiveBuffer();
+        tStreamEnd = Date.now();
+        emitUpdate({ delta: '', done: true, force: true });
+      }
+    };
 
     const processLine = (line) => {
-      if (!line.trim()) {
+      const trimmed = line.trim();
+      if (!trimmed) {
         return;
       }
+      let payload = trimmed;
+      if (usingChatCompletionsApi) {
+        if (payload.startsWith('data:')) {
+          const dataPayload = payload.slice(5).trim();
+          if (!dataPayload || dataPayload === '[DONE]') {
+            processParsed({ done: true });
+            return;
+          }
+          payload = dataPayload;
+        } else if (payload === '[DONE]') {
+          processParsed({ done: true });
+          return;
+        }
+      }
       try {
-        const parsed = JSON.parse(line);
+        const parsed = JSON.parse(payload);
         processParsed(parsed);
       } catch (err) {
         console.error('Failed to parse stream chunk:', err);
@@ -2079,7 +2151,7 @@ ipcMain.handle('ask-ollama', async (
       return { chatId, aborted: true };
     }
 
-    console.error('Error querying Ollama:', err);
+    console.error('Error querying model endpoint:', err);
     event.sender.send('ollama-stream', {
       chatId,
       error: err.message || 'Unknown error',
@@ -2612,6 +2684,10 @@ function applySettingsPatch(base, partial) {
 
   if (partial.shareAnalytics !== undefined) {
     next.shareAnalytics = Boolean(partial.shareAnalytics);
+  }
+
+  if (partial.useOpenAICompatibleEndpoint !== undefined) {
+    next.useOpenAICompatibleEndpoint = Boolean(partial.useOpenAICompatibleEndpoint);
   }
 
   if (partial.analyticsDeviceId !== undefined) {
