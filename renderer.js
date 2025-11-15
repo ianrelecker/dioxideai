@@ -1,11 +1,14 @@
 const urlRegex = /https?:\/\/[^\s]+/gi;
 
 let modelSelect;
+let modelPickerButton;
+let modelPickerCurrent;
+let modelPickerMenu;
 let refreshModelsButton;
-let chatTitleEl;
 let chatListNav;
 let newChatButton;
 let chatArea;
+let chatPane;
 let promptInput;
 let inputForm;
 let sendButton;
@@ -15,11 +18,7 @@ let settingsOverlay;
 let settingsPanel;
 let settingsCloseButton;
 let settingsForm;
-let autoWebSearchToggle;
-let searchResultLimitInput;
-let searchResultValue;
 let themeSelect;
-let sidebarCollapseToggle;
 let deleteAllChatsButton;
 let tutorialOverlay;
 let tutorialPanel;
@@ -27,10 +26,6 @@ let tutorialCloseButton;
 let tutorialStartButton;
 let tutorialDismissCheckbox;
 let openTutorialButton;
-let supportOverlay;
-let supportPanel;
-let supportCloseButton;
-let supportButton;
 let attachButton;
 let attachmentListEl;
 let attachmentNoticeEl;
@@ -40,22 +35,58 @@ let toastHost;
 let shareAnalyticsToggle;
 let tutorialAnalyticsCheckbox;
 let ollamaEndpointInput;
+let chatCompatToggle;
+let modelStatusText;
+let sidebar;
+let deepResearchShelf;
+let deepResearchHeadline;
+let deepResearchStageLabel;
+let deepResearchTimeline;
+let deepResearchSummaryCard;
+let deepResearchSummaryText;
+let deepResearchInsertButton;
+let deepResearchCopyButton;
+let deepResearchDismissButton;
+let composerDeepResearchButton;
+let deepResearchDetails;
 
 const DEFAULT_SETTINGS = {
   autoWebSearch: true,
   openThoughtsByDefault: false,
   searchResultLimit: 10,
-  theme: 'light',
-  sidebarCollapsed: false,
+  theme: 'system',
   showTutorial: true,
   shareAnalytics: true,
   ollamaEndpoint: 'http://localhost:11434',
+  useOpenAICompatibleEndpoint: false,
 };
 
-const ATTACHMENT_LIMIT = 4;
+const ATTACHMENT_LIMIT = 1;
 const ATTACHMENT_MAX_FILE_BYTES = 512 * 1024;
 const ATTACHMENT_TOTAL_BYTES = 1024 * 1024;
 const ATTACHMENT_CHAR_LIMIT = 4000;
+const DEFAULT_DEEP_RESEARCH_ITERATIONS = 4;
+const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const MODEL_LABEL_CHAR_LIMIT = 30;
+const ANALYTICS_ERROR_MAX_LEN = 160;
+const ANALYTICS_QUEUE_STORAGE_KEY = 'dioxideai.analyticsQueue';
+const ANALYTICS_QUEUE_MAX = 200;
+const ANALYTICS_FLUSH_INTERVAL_MS = 4000;
+const analyticsContext = {
+  appVersion: null,
+  platform: (navigator?.userAgentData && navigator.userAgentData.platform) || navigator?.platform || 'unknown',
+  arch: null,
+  releaseChannel: 'production',
+  electronVersion: null,
+  chromeVersion: null,
+  osVersion: null,
+  locale: (navigator?.languages && navigator.languages.length ? navigator.languages[0] : navigator?.language) || 'en-US',
+  timeZone: (typeof Intl !== 'undefined' && Intl.DateTimeFormat
+    ? Intl.DateTimeFormat().resolvedOptions().timeZone
+    : 'UTC'),
+  gpuAdapter: null,
+  proxyConfigured: false,
+};
 
 const state = {
   chats: [],
@@ -72,8 +103,29 @@ const state = {
   attachmentBytes: 0,
   attachmentWarnings: [],
   attachmentProcessingStartedAt: null,
-  sidebarCollapsed: false,
+  sidebarCollapsed: true,
+  deepResearch: createDeepResearchState(),
+  models: [],
+  webSearchStartedAt: null,
+  lastWebSearchDurationMs: null,
+  lastPromptMetrics: null,
+  lastAttachmentIngestDurationMs: null,
+  stopRequested: false,
 };
+
+if (prefersDark) {
+  const handleSystemThemeChange = () => {
+    const preference = state.settings?.theme || DEFAULT_SETTINGS.theme;
+    if (preference === 'system') {
+      applyTheme('system');
+    }
+  };
+  if (typeof prefersDark.addEventListener === 'function') {
+    prefersDark.addEventListener('change', handleSystemThemeChange);
+  } else if (typeof prefersDark.addListener === 'function') {
+    prefersDark.addListener(handleSystemThemeChange);
+  }
+}
 
 const activeToasts = new Map();
 let toastIdCounter = 0;
@@ -83,8 +135,12 @@ let attachmentStatusTimer = null;
 const ATTACHMENT_STATUS_REFRESH_MS = 1000;
 let analyticsInitialized = false;
 let analyticsReady = false;
-
-const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+let modelPickerOpen = false;
+let modelPickerActiveIndex = -1;
+let analyticsQueueLoaded = false;
+let analyticsQueue = [];
+let analyticsFlushTimer = null;
+let analyticsFlushInFlight = false;
 
 const createRequestId = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
@@ -98,12 +154,460 @@ function extractLinks(input) {
   return Array.from(unique);
 }
 
+function hashIdentifier(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return `h${Math.abs(hash)}`;
+}
+
+function sanitizeAnalyticsProps(props = {}) {
+  const entries = Object.entries(props || {});
+  const cleaned = {};
+  entries.forEach(([key, value]) => {
+    if (value === undefined || value === null) {
+      return;
+    }
+    if (typeof value === 'number') {
+      if (Number.isNaN(value)) {
+        return;
+      }
+      cleaned[key] = value;
+      return;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return;
+      }
+      cleaned[key] = trimmed.slice(0, 256);
+      return;
+    }
+    cleaned[key] = value;
+  });
+  return cleaned;
+}
+
+function getEndpointModeLabel() {
+  return state.settings?.useOpenAICompatibleEndpoint ? 'openai-compatible' : 'ollama';
+}
+
+function getEndpointHostLabel() {
+  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.hostname) {
+      return parsed.hostname;
+    }
+  } catch (err) {
+    // ignore
+  }
+  return 'custom-endpoint';
+}
+
+function isRemoteHostname(hostname) {
+  if (!hostname) {
+    return false;
+  }
+  const normalized = hostname.toLowerCase();
+  if (
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '0.0.0.0'
+  ) {
+    return false;
+  }
+  if (normalized.endsWith('.local')) {
+    return false;
+  }
+  return true;
+}
+
+function getEndpointIsRemote() {
+  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  try {
+    const parsed = new URL(endpoint);
+    return isRemoteHostname(parsed.hostname);
+  } catch (err) {
+    return false;
+  }
+}
+
+function getAttachmentMetrics() {
+  const count = state.attachments.length;
+  const bytes =
+    state.attachmentBytes && state.attachmentBytes > 0
+      ? state.attachmentBytes
+      : state.attachments.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+  return {
+    attachments_count: count,
+    attachments_total_bytes: bytes,
+  };
+}
+
+function buildAnalyticsPayload(props = {}) {
+  const attachments = getAttachmentMetrics();
+  const base = {
+    app_version: analyticsContext.appVersion,
+    platform: analyticsContext.platform,
+    arch: analyticsContext.arch,
+    release_channel: analyticsContext.releaseChannel,
+    electron_version: analyticsContext.electronVersion,
+    chrome_version: analyticsContext.chromeVersion,
+    os_version: analyticsContext.osVersion,
+    locale: analyticsContext.locale,
+    time_zone: analyticsContext.timeZone,
+    gpu_adapter: analyticsContext.gpuAdapter,
+    proxy_configured: Boolean(analyticsContext.proxyConfigured),
+    endpoint_mode: getEndpointModeLabel(),
+    endpoint_host: getEndpointHostLabel(),
+    endpoint_is_remote: getEndpointIsRemote(),
+    theme_preference: state.settings?.theme || DEFAULT_SETTINGS.theme,
+    share_analytics_opt_in: Boolean(state.settings?.shareAnalytics),
+    deep_research_enabled: Boolean(state.deepResearch?.enabled),
+    attachments_count: attachments.attachments_count,
+    attachments_total_bytes: attachments.attachments_total_bytes,
+    sidebar_collapsed: Boolean(state.sidebarCollapsed),
+    chat_id_hash: hashIdentifier(state.currentChatId),
+  };
+  return sanitizeAnalyticsProps({ ...base, ...props });
+}
+
+function formatErrorForAnalytics(error) {
+  if (!error) {
+    return 'unknown';
+  }
+  const message = typeof error === 'string' ? error : error?.message;
+  if (!message) {
+    return 'unknown';
+  }
+  return message.slice(0, ANALYTICS_ERROR_MAX_LEN);
+}
+
+async function hydrateAnalyticsContext() {
+  if (typeof window.api?.getAppInfo !== 'function') {
+    return analyticsContext;
+  }
+  try {
+    const info = await window.api.getAppInfo();
+    if (info && typeof info === 'object') {
+      analyticsContext.appVersion = info.version || analyticsContext.appVersion;
+      analyticsContext.arch = info.arch || analyticsContext.arch;
+      analyticsContext.releaseChannel = info.environment || analyticsContext.releaseChannel;
+      analyticsContext.electronVersion = info.electron || analyticsContext.electronVersion;
+      analyticsContext.chromeVersion = info.chrome || analyticsContext.chromeVersion;
+      if (info.platform) {
+        analyticsContext.platform = info.platform;
+      }
+      if (info.osVersion) {
+        analyticsContext.osVersion = info.osVersion;
+      }
+      if (info.locale) {
+        analyticsContext.locale = info.locale;
+      }
+      if (info.gpuAdapter) {
+        analyticsContext.gpuAdapter = info.gpuAdapter;
+      }
+      analyticsContext.proxyConfigured = Boolean(info.proxyConfigured);
+    }
+  } catch (err) {
+    console.error('Failed to load app info for analytics:', err);
+  }
+  return analyticsContext;
+}
+
+function loadAnalyticsQueueFromStorage() {
+  if (analyticsQueueLoaded) {
+    return;
+  }
+  analyticsQueueLoaded = true;
+  if (!window?.localStorage) {
+    analyticsQueue = [];
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(ANALYTICS_QUEUE_STORAGE_KEY);
+    if (!raw) {
+      analyticsQueue = [];
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      analyticsQueue = parsed.filter((event) => event && typeof event.name === 'string');
+    }
+  } catch (err) {
+    analyticsQueue = [];
+    console.error('Failed to load analytics queue:', err);
+  }
+}
+
+function persistAnalyticsQueue() {
+  if (!window?.localStorage) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(ANALYTICS_QUEUE_STORAGE_KEY, JSON.stringify(analyticsQueue));
+  } catch (err) {
+    console.error('Failed to persist analytics queue:', err);
+  }
+}
+
+function scheduleAnalyticsFlush(immediate = false) {
+  if (!analyticsReady) {
+    return;
+  }
+  if (analyticsFlushTimer) {
+    clearTimeout(analyticsFlushTimer);
+    analyticsFlushTimer = null;
+  }
+  const delay = immediate ? 0 : ANALYTICS_FLUSH_INTERVAL_MS;
+  analyticsFlushTimer = setTimeout(() => {
+    analyticsFlushTimer = null;
+    flushAnalyticsQueue();
+  }, delay);
+}
+
+async function flushAnalyticsQueue() {
+  if (analyticsFlushInFlight || !analyticsReady || typeof window.api?.trackAnalyticsEvent !== 'function') {
+    return;
+  }
+  loadAnalyticsQueueFromStorage();
+  if (!analyticsQueue.length) {
+    return;
+  }
+  analyticsFlushInFlight = true;
+  try {
+    while (analyticsQueue.length && analyticsReady) {
+      const { name, props } = analyticsQueue[0];
+      try {
+        await window.api.trackAnalyticsEvent(name, props);
+        analyticsQueue.shift();
+        persistAnalyticsQueue();
+      } catch (err) {
+        console.error('Failed to send analytics event:', err);
+        break;
+      }
+    }
+  } finally {
+    analyticsFlushInFlight = false;
+    if (analyticsQueue.length && analyticsReady) {
+      scheduleAnalyticsFlush();
+    }
+  }
+}
+
+function enqueueAnalyticsEvent(name, props) {
+  if (!name) {
+    return;
+  }
+  loadAnalyticsQueueFromStorage();
+  analyticsQueue.push({ name, props });
+  if (analyticsQueue.length > ANALYTICS_QUEUE_MAX) {
+    analyticsQueue = analyticsQueue.slice(-ANALYTICS_QUEUE_MAX);
+  }
+  persistAnalyticsQueue();
+  if (analyticsReady) {
+    scheduleAnalyticsFlush(true);
+  }
+}
+
+function createDeepResearchState() {
+  return {
+    enabled: false,
+    running: false,
+    requestId: null,
+    chatId: null,
+    topic: '',
+    stage: '',
+    message: '',
+    iteration: 0,
+    totalIterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+    timeline: [],
+    summary: '',
+    sources: [],
+    error: null,
+    lastUpdated: null,
+    statusLine: '',
+    answer: '',
+    log: [],
+    primaryGoal: '',
+  };
+}
+
+function syncDeepResearchStatusLine() {
+  if (!state.deepResearch.running) {
+    return;
+  }
+  const status = state.deepResearch.statusLine?.trim();
+  if (!status) {
+    return;
+  }
+  const entry = state.activeAssistantEntry;
+  if (entry?.setLoadingStatus) {
+    entry.setLoadingStatus(status);
+  }
+}
+
+function appendDeepResearchLog(log = [], payload = {}) {
+  const line = describeDeepResearchProgress(payload);
+  if (!line) {
+    return Array.isArray(log) ? log : [];
+  }
+  const next = Array.isArray(log) ? [...log, line] : [line];
+  return next.slice(-8);
+}
+
+function describeDeepResearchProgress(payload = {}) {
+  const parts = [];
+  if (Number.isFinite(payload.iteration) && payload.iteration > 0) {
+    const total = Number.isFinite(payload.totalIterations) ? payload.totalIterations : null;
+    parts.push(`Pass ${payload.iteration}${total ? `/${total}` : ''}`);
+  } else if (payload.stage === 'planning') {
+    parts.push('Planning');
+  }
+
+  if (payload.message) {
+    parts.push(payload.message);
+  } else {
+    switch (payload.stage) {
+      case 'iteration-start':
+        parts.push('Searching for new sources…');
+        break;
+      case 'iteration-review':
+        parts.push('Reviewing captured sources…');
+        break;
+      case 'iteration-reflection':
+        parts.push('Analyzing coverage…');
+        break;
+      case 'model-draft':
+        parts.push('Drafting answer from findings…');
+        break;
+      case 'model-eval':
+        parts.push('Evaluating draft answer…');
+        break;
+      case 'model-error':
+        parts.push('Draft synthesis failed.');
+        break;
+      case 'iteration-error':
+        parts.push('Search failed.');
+        break;
+      default:
+        break;
+    }
+  }
+
+  return parts.filter(Boolean).join(' – ');
+}
+
+function buildDeepResearchProgressLabel(dr) {
+  if (!dr?.running) {
+    return '';
+  }
+  if (Number.isFinite(dr.iteration) && dr.iteration > 0) {
+    const total = Number.isFinite(dr.totalIterations) ? dr.totalIterations : null;
+    return `Deep research – Pass ${dr.iteration}${total ? `/${total}` : ''}`;
+  }
+  return 'Deep research – Preparing…';
+}
+
+function buildDeepResearchLogText(log, fallback) {
+  if (Array.isArray(log) && log.length) {
+    return log.join('\n');
+  }
+  return fallback || '';
+}
+
+function updateDeepResearchLiveOutput() {
+  const entry = state.activeAssistantEntry;
+  const dr = state.deepResearch;
+  if (!entry || !dr?.running) {
+    return;
+  }
+  const label = buildDeepResearchProgressLabel(dr);
+  if (label) {
+    entry.setSummary(label);
+  }
+  const status = dr.statusLine || dr.message || 'Running deep research…';
+  entry.setLoadingStatus?.(status);
+  const logText = buildDeepResearchLogText(dr.log, status);
+  if (logText) {
+    entry.setThought(logText);
+    entry.openThoughts();
+  }
+}
+
+function formatDeepResearchStatusLine(payload, snapshot = {}) {
+  if (!payload) {
+    return '';
+  }
+  const stage = payload.stage || snapshot.stage;
+  if (stage === 'complete' || stage === 'error') {
+    return '';
+  }
+  const totalIterations = Number.isFinite(snapshot.totalIterations)
+    ? snapshot.totalIterations
+    : DEFAULT_DEEP_RESEARCH_ITERATIONS;
+  const parts = ['Deep research'];
+  if (Number.isFinite(payload.iteration) && payload.iteration > 0) {
+    parts.push(`Pass ${payload.iteration}/${totalIterations}`);
+  }
+  const base = parts.join(' · ');
+  const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+  return message ? `${base} – ${message}` : base;
+}
+
 function stopGeneration(requestId) {
   if (!requestId) {
     return Promise.resolve();
   }
 
   return window.api.cancelOllama({ requestId });
+}
+
+function syncSendButtonState() {
+  if (!sendButton) {
+    return;
+  }
+  if (state.isStreaming) {
+    if (state.stopRequested) {
+      sendButton.textContent = 'Stopping…';
+      sendButton.disabled = true;
+    } else {
+      sendButton.textContent = 'Stop';
+      sendButton.disabled = false;
+    }
+    sendButton.classList.add('send-btn-stop');
+  } else {
+    state.stopRequested = false;
+    sendButton.textContent = 'Send';
+    sendButton.disabled = false;
+    sendButton.classList.remove('send-btn-stop');
+  }
+}
+
+async function handleStopRequest() {
+  if (!state.isStreaming || state.stopRequested) {
+    return;
+  }
+  state.stopRequested = true;
+  syncSendButtonState();
+  const requestId = state.activeRequestId;
+  if (!requestId) {
+    return;
+  }
+  try {
+    await stopGeneration(requestId);
+  } catch (err) {
+    console.error('Failed to cancel generation:', err);
+    state.stopRequested = false;
+    syncSendButtonState();
+  }
 }
 
 function formatBytes(value) {
@@ -209,14 +713,28 @@ function notifyAttachmentWarnings(warnings) {
   });
 }
 
+function removeEmptyState() {
+  if (!chatArea) {
+    return;
+  }
+  const placeholder = chatArea.querySelector('.empty-state');
+  if (placeholder && placeholder.parentElement === chatArea) {
+    chatArea.removeChild(placeholder);
+  }
+}
+
 function trackAnalyticsEvent(name, props = {}) {
-  if (!analyticsReady || typeof window.api.trackAnalyticsEvent !== 'function' || !name) {
+  if (!name) {
     return;
   }
   try {
-    window.api.trackAnalyticsEvent(name, props);
+    const payload = buildAnalyticsPayload(props);
+    enqueueAnalyticsEvent(name, payload);
+    if (analyticsReady) {
+      flushAnalyticsQueue();
+    }
   } catch (err) {
-    console.error('Failed to track analytics event:', err);
+    console.error('Failed to enqueue analytics event:', err);
   }
 }
 
@@ -235,6 +753,10 @@ async function setShareAnalyticsPreference(enabled) {
     const result = await window.api.initAnalytics({ optOut: !share });
     analyticsInitialized = Boolean(result?.initialized);
     analyticsReady = analyticsInitialized && !result?.optedOut;
+    if (analyticsReady) {
+      scheduleAnalyticsFlush(true);
+      flushAnalyticsQueue();
+    }
   } catch (err) {
     analyticsInitialized = false;
     analyticsReady = false;
@@ -367,8 +889,78 @@ function stopAttachmentStatusTimer() {
     clearInterval(attachmentStatusTimer);
     attachmentStatusTimer = null;
   }
+  if (typeof state.attachmentProcessingStartedAt === 'number') {
+    state.lastAttachmentIngestDurationMs = Math.max(0, Date.now() - state.attachmentProcessingStartedAt);
+  }
   state.attachmentProcessingStartedAt = null;
   updateAttachmentNoticeText();
+}
+
+function consumePromptAnalyticsSnapshot() {
+  const snapshot = {
+    prompt: state.lastPromptMetrics || {},
+    webFetchMs: state.lastWebSearchDurationMs,
+    attachmentMs: state.lastAttachmentIngestDurationMs,
+  };
+  state.lastPromptMetrics = null;
+  state.webSearchStartedAt = null;
+  state.lastWebSearchDurationMs = null;
+  state.lastAttachmentIngestDurationMs = null;
+  return snapshot;
+}
+
+function finalizeWebSearchDuration() {
+  if (typeof state.webSearchStartedAt === 'number') {
+    state.lastWebSearchDurationMs = Math.max(0, Date.now() - state.webSearchStartedAt);
+    state.webSearchStartedAt = null;
+  }
+  return state.lastWebSearchDurationMs;
+}
+
+function trackResponseCompletedAnalytics(result, { model, usedDeepResearch }) {
+  const snapshot = consumePromptAnalyticsSnapshot();
+  const promptMetrics = snapshot.prompt || {};
+  const timing = result?.timing || {};
+  const totalMs =
+    timing.totalMs ??
+    (promptMetrics.startedAt ? Math.max(0, Date.now() - promptMetrics.startedAt) : null);
+  trackAnalyticsEvent('response_completed', {
+    model: model || promptMetrics.model || null,
+    prompt_chars: promptMetrics.promptChars ?? null,
+    response_chars: typeof result.answer === 'string' ? result.answer.length : null,
+    model_load_ms: timing.loadMs ?? timing.firstTokenMs ?? null,
+    generation_ms: timing.generationMs ?? timing.streamMs ?? null,
+    total_ms: totalMs,
+    tokens: Number.isFinite(timing.tokens) ? timing.tokens : null,
+    tokens_per_second: Number.isFinite(timing.tokensPerSecond) ? timing.tokensPerSecond : null,
+    web_fetch_ms: snapshot.webFetchMs ?? null,
+    attachments_ingest_ms: snapshot.attachmentMs ?? null,
+    used_web_search: Boolean(result.usedWebSearch),
+    reused_conversation_memory: Boolean(result.reusedConversationMemory),
+    used_deep_research: Boolean(usedDeepResearch),
+    used_attachments: Boolean(promptMetrics.attachmentsCount),
+  });
+}
+
+function trackResponseErrorAnalytics(errorType, errorMessage, { model, timing } = {}) {
+  const snapshot = consumePromptAnalyticsSnapshot();
+  const promptMetrics = snapshot.prompt || {};
+  const timingInfo = timing || {};
+  const totalMs =
+    timingInfo.totalMs ??
+    (promptMetrics.startedAt ? Math.max(0, Date.now() - promptMetrics.startedAt) : null);
+  trackAnalyticsEvent('response_error', {
+    model: model || promptMetrics.model || null,
+    prompt_chars: promptMetrics.promptChars ?? null,
+    error_type: errorType,
+    error_message: errorMessage ? errorMessage.slice(0, ANALYTICS_ERROR_MAX_LEN) : 'unknown',
+    model_load_ms: timingInfo.loadMs ?? timingInfo.firstTokenMs ?? null,
+    generation_ms: timingInfo.generationMs ?? timingInfo.streamMs ?? null,
+    total_ms: totalMs,
+    web_fetch_ms: snapshot.webFetchMs ?? null,
+    attachments_ingest_ms: snapshot.attachmentMs ?? null,
+    used_attachments: Boolean(promptMetrics.attachmentsCount),
+  });
 }
 
 function setComposerDragState(active) {
@@ -410,6 +1002,33 @@ function registerGlobalDropGuards() {
   window.addEventListener('drop', guardDrop);
 
   globalDropGuardsRegistered = true;
+}
+
+function handleExternalLink(event) {
+  const anchor = event.target?.closest?.('a[href]');
+  if (!anchor) {
+    return;
+  }
+  const href = anchor.getAttribute('href');
+  if (!href || href.startsWith('#') || !/^https?:/i.test(href)) {
+    return;
+  }
+  if (typeof window.api?.openExternal !== 'function') {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  window.api.openExternal(href);
+}
+
+function registerExternalLinkHandler() {
+  document.addEventListener('click', handleExternalLink, true);
+  document.addEventListener('auxclick', (event) => {
+    if (event.button === 0) {
+      return;
+    }
+    handleExternalLink(event);
+  }, true);
 }
 
 function registerComposerDropZone() {
@@ -689,10 +1308,13 @@ function applyAttachmentSelection(result) {
 window.addEventListener('DOMContentLoaded', async () => {
 
   modelSelect = document.getElementById('modelSelect');
+  modelPickerButton = document.getElementById('modelPickerButton');
+  modelPickerCurrent = document.getElementById('modelPickerCurrent');
+  modelPickerMenu = document.getElementById('modelPickerMenu');
   refreshModelsButton = document.getElementById('refreshModels');
-  chatTitleEl = document.getElementById('chatTitle');
   chatListNav = document.getElementById('chatList');
   newChatButton = document.getElementById('newChatBtn');
+  chatPane = document.getElementById('chatPane');
   chatArea = document.getElementById('chatArea');
   promptInput = document.getElementById('promptInput');
   inputForm = document.getElementById('inputForm');
@@ -703,11 +1325,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   settingsPanel = document.getElementById('settingsPanel');
   settingsCloseButton = document.getElementById('settingsCloseBtn');
   settingsForm = document.getElementById('settingsForm');
-  autoWebSearchToggle = document.getElementById('autoWebSearchToggle');
-  searchResultLimitInput = document.getElementById('searchResultLimit');
-  searchResultValue = document.getElementById('searchResultValue');
   themeSelect = document.getElementById('themeSelect');
-  sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
   deleteAllChatsButton = document.getElementById('deleteAllChatsBtn');
   tutorialOverlay = document.getElementById('tutorialOverlay');
   tutorialPanel = document.getElementById('tutorialPanel');
@@ -715,10 +1333,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   tutorialStartButton = document.getElementById('tutorialStartBtn');
   tutorialDismissCheckbox = document.getElementById('tutorialDismissCheckbox');
   openTutorialButton = document.getElementById('openTutorialBtn');
-  supportOverlay = document.getElementById('supportOverlay');
-  supportPanel = document.getElementById('supportPanel');
-  supportCloseButton = document.getElementById('supportCloseBtn');
-  supportButton = document.getElementById('supportBtn');
   attachButton = document.getElementById('attachBtn');
   attachmentListEl = document.getElementById('attachmentList');
   attachmentNoticeEl = document.getElementById('attachmentNotice');
@@ -728,8 +1342,59 @@ window.addEventListener('DOMContentLoaded', async () => {
   shareAnalyticsToggle = document.getElementById('shareAnalyticsToggle');
   tutorialAnalyticsCheckbox = document.getElementById('tutorialAnalyticsCheckbox');
   ollamaEndpointInput = document.getElementById('ollamaEndpointInput');
+  chatCompatToggle = document.getElementById('chatCompatToggle');
+  modelStatusText = document.getElementById('modelStatus');
+  updateModelStatus('Models not loaded yet.', 'muted');
+  renderNoModelsPlaceholder();
+  sidebar = document.getElementById('sidebar');
+  document.addEventListener('click', handleSidebarOverlayDismiss);
+  composerDeepResearchButton = document.getElementById('composerDeepResearchBtn');
+  deepResearchShelf = document.getElementById('deepResearchShelf');
+  deepResearchHeadline = document.getElementById('deepResearchHeadline');
+  deepResearchStageLabel = document.getElementById('deepResearchStage');
+  deepResearchTimeline = document.getElementById('deepResearchTimeline');
+  deepResearchSummaryCard = document.getElementById('deepResearchSummaryCard');
+  deepResearchSummaryText = document.getElementById('deepResearchSummaryText');
+  deepResearchInsertButton = document.getElementById('deepResearchInsertBtn');
+  deepResearchCopyButton = document.getElementById('deepResearchCopyBtn');
+  deepResearchDismissButton = document.getElementById('deepResearchDismissBtn');
+  deepResearchDetails = document.getElementById('deepResearchDetails');
 
   registerGlobalDropGuards();
+  registerExternalLinkHandler();
+
+  loadAnalyticsQueueFromStorage();
+  window.addEventListener('online', () => {
+    if (analyticsReady) {
+      scheduleAnalyticsFlush(true);
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && analyticsReady) {
+      scheduleAnalyticsFlush(true);
+    }
+  });
+  await hydrateAnalyticsContext();
+
+  if (modelPickerButton && modelPickerMenu) {
+    modelPickerButton.addEventListener('click', () => {
+      if (modelPickerOpen) {
+        closeModelPickerMenu({ focusButton: false });
+      } else {
+        openModelPickerMenu();
+      }
+    });
+    modelPickerButton.addEventListener('keydown', handleModelPickerButtonKeydown);
+    modelPickerMenu.addEventListener('keydown', handleModelPickerMenuKeydown);
+    modelPickerMenu.addEventListener('click', (event) => {
+      const target = event.target?.closest('.model-picker-option');
+      if (!target) {
+        return;
+      }
+      event.preventDefault();
+      handleModelPickerSelection(target.dataset.value);
+    });
+  }
 
   try {
     registerStreamHandlers();
@@ -741,6 +1406,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     await populateModels();
     await initializeChats();
     promptInput.focus();
+    updateDeepResearchShelf();
+    updateDeepResearchButtons();
+    handlePromptAutosize();
   } catch (error) {
     console.error('Initialization failed:', error);
   }
@@ -776,6 +1444,14 @@ function registerUIListeners() {
     await handlePromptSubmit();
   });
 
+  sendButton?.addEventListener('click', async (event) => {
+    if (!state.isStreaming) {
+      return;
+    }
+    event.preventDefault();
+    await handleStopRequest();
+  });
+
   promptInput.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing) {
       return;
@@ -785,6 +1461,7 @@ function registerUIListeners() {
       await handlePromptSubmit();
     }
   });
+  promptInput.addEventListener('input', handlePromptAutosize);
 
   attachButton?.addEventListener('click', async () => {
     if (state.isStreaming) {
@@ -793,10 +1470,21 @@ function registerUIListeners() {
     await handleAttachmentPick();
   });
 
+  composerDeepResearchButton?.addEventListener('click', toggleDeepResearchEnabled);
+  composerDeepResearchButton?.addEventListener('keydown', async (event) => {
+    if (event.key !== 'Enter' || event.shiftKey || state.isStreaming) {
+      return;
+    }
+    event.preventDefault();
+    await handlePromptSubmit();
+  });
+  deepResearchInsertButton?.addEventListener('click', handleDeepResearchInsert);
+  deepResearchCopyButton?.addEventListener('click', handleDeepResearchCopy);
+  deepResearchDismissButton?.addEventListener('click', dismissDeepResearchShelf);
+
   sidebarToggleBtn?.addEventListener('click', () => {
     const nextValue = !state.sidebarCollapsed;
     updateSidebarState(nextValue);
-    applySettingsUpdate({ sidebarCollapsed: nextValue });
   });
 
   settingsButton?.addEventListener('click', openSettingsPanel);
@@ -814,18 +1502,10 @@ function registerUIListeners() {
   });
 
   settingsForm?.addEventListener('submit', (event) => event.preventDefault());
-  autoWebSearchToggle?.addEventListener('change', () =>
-    applySettingsUpdate({ autoWebSearch: autoWebSearchToggle.checked })
-  );
   themeSelect?.addEventListener('change', () => {
     const nextTheme = themeSelect.value;
     applyTheme(nextTheme);
     applySettingsUpdate({ theme: nextTheme });
-  });
-  sidebarCollapseToggle?.addEventListener('change', () => {
-    const next = sidebarCollapseToggle.checked;
-    updateSidebarState(next);
-    applySettingsUpdate({ sidebarCollapsed: next });
   });
   shareAnalyticsToggle?.addEventListener('change', async () => {
     const enabled = shareAnalyticsToggle.checked;
@@ -856,27 +1536,14 @@ function registerUIListeners() {
     await applySettingsUpdate({ ollamaEndpoint: value });
     await populateModels();
   });
-  searchResultLimitInput?.addEventListener('input', () =>
-    updateSearchResultLabel(Number(searchResultLimitInput.value))
-  );
-  searchResultLimitInput?.addEventListener('change', () =>
-    applySettingsUpdate({ searchResultLimit: Number(searchResultLimitInput.value) })
-  );
+  chatCompatToggle?.addEventListener('change', async () => {
+    const enabled = chatCompatToggle.checked;
+    await applySettingsUpdate({ useOpenAICompatibleEndpoint: enabled });
+    await populateModels();
+  });
 
   deleteAllChatsButton?.addEventListener('click', handleDeleteAllChats);
-  supportButton?.addEventListener('click', toggleSupportPopover);
-  supportCloseButton?.addEventListener('click', (event) => {
-    event.preventDefault();
-    closeSupportPopover();
-  });
-  supportOverlay?.addEventListener('click', (event) => {
-    if (event.target === supportOverlay || event.target.classList?.contains('support-backdrop')) {
-      closeSupportPopover();
-    }
-  });
-  supportPanel?.addEventListener('click', (event) => event.stopPropagation());
   openTutorialButton?.addEventListener('click', () => {
-    setWebSearchToggleState(Boolean(state.settings?.autoWebSearch ?? true));
     if (tutorialDismissCheckbox) {
       tutorialDismissCheckbox.checked = Boolean(state.settings?.showTutorial ?? true);
     }
@@ -904,7 +1571,7 @@ function registerUIListeners() {
 
 
 
-  document.addEventListener('keydown', (event) => {
+  document.addEventListener('keydown', async (event) => {
     if (event.key === 'Escape') {
       if (state.settingsPanelOpen) {
         closeSettingsPanel();
@@ -912,11 +1579,31 @@ function registerUIListeners() {
       if (!tutorialOverlay?.classList.contains('hidden')) {
         dismissTutorial();
       }
-      if (supportOverlay && !supportOverlay.classList.contains('hidden')) {
-        closeSupportPopover();
+      return;
+    }
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    const cmdOrCtrl = isMac ? event.metaKey : event.ctrlKey;
+    if (cmdOrCtrl && !event.shiftKey && !event.altKey && !event.isComposing) {
+      if (event.key === 'n' || event.key === 'N') {
+        event.preventDefault();
+        if (!state.isStreaming) {
+          await handleNewChat();
+        }
       }
     }
   });
+}
+
+function handlePromptAutosize() {
+  if (!promptInput) {
+    return;
+  }
+  const lineHeight = parseFloat(window.getComputedStyle(promptInput).lineHeight) || 20;
+  const maxLines = 3;
+  const maxHeight = lineHeight * maxLines;
+  promptInput.style.height = 'auto';
+  const nextHeight = Math.min(promptInput.scrollHeight, maxHeight);
+  promptInput.style.height = `${Math.max(nextHeight, lineHeight + 4)}px`;
 }
 
 async function loadSettings() {
@@ -928,17 +1615,25 @@ async function loadSettings() {
     state.settings = state.settings || { ...DEFAULT_SETTINGS };
   }
 
+  const enforced = {};
+  if (state.settings.autoWebSearch !== DEFAULT_SETTINGS.autoWebSearch) {
+    state.settings.autoWebSearch = DEFAULT_SETTINGS.autoWebSearch;
+    enforced.autoWebSearch = DEFAULT_SETTINGS.autoWebSearch;
+  }
+  if (state.settings.searchResultLimit !== DEFAULT_SETTINGS.searchResultLimit) {
+    state.settings.searchResultLimit = DEFAULT_SETTINGS.searchResultLimit;
+    enforced.searchResultLimit = DEFAULT_SETTINGS.searchResultLimit;
+  }
+  if (Object.keys(enforced).length) {
+    await applySettingsUpdate(enforced);
+  }
+
   await setShareAnalyticsPreference(state.settings.shareAnalytics !== false);
   applySettingsToUI();
 }
 
 function applySettingsToUI() {
   const prefs = state.settings || DEFAULT_SETTINGS;
-
-  if (autoWebSearchToggle) {
-    autoWebSearchToggle.checked = Boolean(prefs.autoWebSearch);
-  }
-  setWebSearchToggleState(Boolean(prefs.autoWebSearch));
 
   if (shareAnalyticsToggle) {
     shareAnalyticsToggle.checked = prefs.shareAnalytics !== false;
@@ -949,22 +1644,16 @@ function applySettingsToUI() {
   if (ollamaEndpointInput) {
     ollamaEndpointInput.value = prefs.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
   }
-
-  const limit = clampSearchLimitForUI(prefs.searchResultLimit);
-  if (searchResultLimitInput) {
-    searchResultLimitInput.value = String(limit);
+  if (chatCompatToggle) {
+    chatCompatToggle.checked = Boolean(prefs.useOpenAICompatibleEndpoint);
   }
-  updateSearchResultLabel(limit);
 
   if (themeSelect) {
     themeSelect.value = prefs.theme || 'system';
   }
 
-  if (sidebarCollapseToggle) {
-    sidebarCollapseToggle.checked = Boolean(prefs.sidebarCollapsed);
-  }
-
-  updateSidebarState(Boolean(prefs.sidebarCollapsed));
+  const collapsed = state.sidebarCollapsed !== false;
+  updateSidebarState(collapsed);
   applyTheme(prefs.theme || DEFAULT_SETTINGS.theme);
 
   if (tutorialDismissCheckbox) {
@@ -983,7 +1672,6 @@ function applySettingsToUI() {
 }
 
 function openSettingsPanel() {
-  closeSupportPopover();
   applySettingsToUI();
   settingsOverlay.classList.remove('hidden');
   settingsOverlay.setAttribute('aria-hidden', 'false');
@@ -1021,16 +1709,10 @@ async function applySettingsUpdate(partial) {
   }
 }
 
-function setWebSearchToggleState(enabled) {
-  state.settings = state.settings || { ...DEFAULT_SETTINGS };
-  state.settings.autoWebSearch = Boolean(enabled);
-}
-
 function openTutorial() {
   if (!tutorialOverlay || !tutorialPanel) {
     return;
   }
-  closeSupportPopover();
   if (tutorialDismissCheckbox) {
     tutorialDismissCheckbox.checked = state.settings?.showTutorial !== false;
   }
@@ -1048,7 +1730,6 @@ function dismissTutorial(shouldPersist = true) {
   if (!tutorialOverlay) {
     return;
   }
-  closeSupportPopover();
   if (shouldPersist && tutorialDismissCheckbox) {
     const shouldShow = tutorialDismissCheckbox.checked;
     state.skipTutorialOnce = shouldShow;
@@ -1062,65 +1743,6 @@ function dismissTutorial(shouldPersist = true) {
   tutorialOverlay.setAttribute('aria-hidden', 'true');
   tutorialPanel?.setAttribute('tabindex', '');
   document.body.classList.remove('tutorial-open');
-}
-
-function toggleSupportPopover(event) {
-  if (event) {
-    event.stopPropagation();
-  }
-  if (!supportOverlay || !supportButton) {
-    return;
-  }
-  const shouldOpen = supportOverlay.classList.contains('hidden');
-  if (shouldOpen) {
-    supportOverlay.classList.remove('hidden');
-    supportOverlay.setAttribute('aria-hidden', 'false');
-    supportButton.classList.add('active');
-    supportButton.setAttribute('aria-expanded', 'true');
-    document.body.classList.add('support-open');
-    if (supportPanel) {
-      supportPanel.setAttribute('tabindex', '-1');
-      if (typeof supportPanel.focus === 'function') {
-        try {
-          supportPanel.focus({ preventScroll: true });
-        } catch (err) {
-          supportPanel.focus();
-        }
-      }
-    }
-  } else {
-    closeSupportPopover();
-  }
-}
-
-function closeSupportPopover() {
-  if (!supportOverlay || !supportButton) {
-    return;
-  }
-  if (supportOverlay.classList.contains('hidden')) {
-    return;
-  }
-  supportOverlay.classList.add('hidden');
-  supportOverlay.setAttribute('aria-hidden', 'true');
-  supportButton.classList.remove('active');
-  supportButton.setAttribute('aria-expanded', 'false');
-  document.body.classList.remove('support-open');
-  supportPanel?.setAttribute('tabindex', '');
-  if (typeof supportButton.focus === 'function') {
-    supportButton.focus();
-  }
-}
-
-function updateSearchResultLabel(value) {
-  if (!searchResultValue) {
-    return;
-  }
-  searchResultValue.textContent = String(clampSearchLimitForUI(value));
-}
-
-function clampSearchLimitForUI(value) {
-  const numeric = Number.isFinite(Number(value)) ? Number(value) : DEFAULT_SETTINGS.searchResultLimit;
-  return Math.max(1, Math.min(12, Math.round(numeric)));
 }
 
 function registerStreamHandlers() {
@@ -1207,6 +1829,7 @@ function registerStreamHandlers() {
         break;
       }
       case 'generating': {
+        finalizeWebSearchDuration();
         const status = deriveStatus('Generating response…');
         entry.setSummary(status);
         entry.setLoadingStatus?.(status);
@@ -1214,6 +1837,10 @@ function registerStreamHandlers() {
       }
       case 'search-plan':
       case 'search-started': {
+        if (typeof state.webSearchStartedAt !== 'number') {
+          state.webSearchStartedAt = Date.now();
+        }
+        state.lastWebSearchDurationMs = null;
         const status = deriveStatus('Searching the web…');
         entry.setSummary(status);
         entry.setLoadingStatus?.(status);
@@ -1226,13 +1853,19 @@ function registerStreamHandlers() {
         break;
       }
       case 'context': {
+        finalizeWebSearchDuration();
         const hasContext =
           Boolean(data.context?.trim()) ||
           (Array.isArray(data.attachments) && data.attachments.length > 0);
         const status = deriveStatus(
           hasContext ? 'Reviewing gathered context…' : 'No additional context used.'
         );
-        entry.setSummary(status);
+        const hasDeepResearch =
+          data.deepResearch &&
+          (data.deepResearch.summary ||
+            data.deepResearch.answer ||
+            (Array.isArray(data.deepResearch.sources) && data.deepResearch.sources.length > 0));
+        entry.setSummary(hasDeepResearch ? 'Deep research notes & timing' : status);
         entry.setLoadingStatus?.(status);
         entry.setThought(
           formatContextThought({
@@ -1261,48 +1894,930 @@ function registerStreamHandlers() {
         break;
     }
   });
+
+  window.api.onDeepResearchProgress((payload) => {
+    handleDeepResearchProgress(payload);
+  });
 }
 
-async function populateModels() {
-  setModelControlsDisabled(true);
-  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+function toggleDeepResearchEnabled() {
+  if (state.isStreaming || state.deepResearch.running) {
+    showToast('Finish the current response before changing deep research.', { variant: 'info' });
+    return;
+  }
+
+  const nextEnabled = !state.deepResearch.enabled;
+  state.deepResearch = {
+    ...state.deepResearch,
+    enabled: nextEnabled,
+    chatId: state.currentChatId || state.deepResearch.chatId,
+  };
+  updateDeepResearchButtons();
+
+}
+
+async function runDeepResearchSequence(topicSource, model) {
+  const topicInput = typeof topicSource === 'string' ? topicSource.trim() : '';
+  const topic = topicInput || resolveDeepResearchTopic(topicInput);
+  if (!topic) {
+    return null;
+  }
+
+  const requestId = createRequestId();
+  const primaryGoal = resolveChatPrimaryGoal();
+  state.deepResearch = {
+    ...state.deepResearch,
+    running: true,
+    requestId,
+    chatId: state.currentChatId,
+    topic,
+    stage: 'planning',
+    message: 'Planning multi-pass web research…',
+    summary: '',
+    sources: [],
+    timeline: [],
+    iteration: 0,
+    totalIterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+    error: null,
+    statusLine: '',
+    answer: '',
+    log: [],
+    primaryGoal,
+  };
+  updateDeepResearchShelf();
+  updateDeepResearchButtons();
+  updateInteractivity();
+  updateDeepResearchLiveOutput();
+
+  trackAnalyticsEvent('deep_research_started', {
+    chat_id: state.currentChatId,
+    topic_chars: topic.length,
+    iterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+    mode: 'pre-send-toggle',
+  });
 
   try {
-    const models = await window.api.getModels();
-    modelSelect.innerHTML = '';
+    const response = await window.api.deepResearch({
+      chatId: state.currentChatId,
+      topic,
+      requestId,
+      iterations: DEFAULT_DEEP_RESEARCH_ITERATIONS,
+      model,
+      initialGoal: primaryGoal,
+    });
 
-    if (!models.length) {
-      const option = document.createElement('option');
-      option.textContent = `No models detected at ${endpoint}`;
-      option.value = '';
-      option.disabled = true;
-      option.selected = true;
-      modelSelect.appendChild(option);
-      showToast(`No Ollama models detected at ${endpoint}. Start Ollama and refresh.`, {
-        variant: 'warning',
-        duration: 8000,
-      });
-      return;
+    if (response?.error) {
+      throw new Error(response.error);
     }
 
-    models.forEach((name) => {
-      const option = document.createElement('option');
-      option.value = name;
-      option.textContent = name;
-      modelSelect.appendChild(option);
+    const normalized = {
+      summary: response.summary || '',
+      sources: Array.isArray(response.sources) ? response.sources : [],
+      timeline: Array.isArray(response.timeline) ? response.timeline : [],
+      iterations: Number(response.iterations) || DEFAULT_DEEP_RESEARCH_ITERATIONS,
+      answer: typeof response.answer === 'string' ? response.answer.trim() : '',
+    };
+
+    state.deepResearch = {
+      ...state.deepResearch,
+      running: false,
+      requestId: null,
+      stage: 'complete',
+      message: 'Deep research ready to review.',
+      summary: normalized.summary,
+      sources: normalized.sources,
+    timeline: normalized.timeline.map((entry) => ({
+      ...entry,
+      status: entry.status || 'complete',
+    })),
+    error: null,
+    answer: normalized.answer,
+    statusLine: '',
+    log: [],
+    primaryGoal,
+  };
+    updateDeepResearchShelf();
+    trackAnalyticsEvent('deep_research_completed', {
+      chat_id: state.currentChatId,
+      iterations: normalized.iterations,
+      sources: normalized.sources.length,
+      mode: 'pre-send-toggle',
     });
+    return normalized;
   } catch (err) {
-    console.error(err);
+    console.error('Deep research failed:', err);
+    const message = err?.message || 'Unable to complete deep research right now.';
+    state.deepResearch = {
+      ...state.deepResearch,
+      running: false,
+      requestId: null,
+      error: message,
+      message,
+      statusLine: '',
+      log: [],
+      answer: '',
+      primaryGoal,
+    };
+    updateDeepResearchShelf();
+    showToast(message, { variant: 'warning' });
+    trackAnalyticsEvent('deep_research_failed', {
+      chat_id: state.currentChatId,
+      reason: String(message).slice(0, 120),
+      mode: 'pre-send-toggle',
+    });
+    return null;
+  } finally {
+    updateInteractivity();
+  }
+}
+
+function resolveDeepResearchTopic(fallbackPrompt) {
+  const candidate =
+    typeof fallbackPrompt === 'string' && fallbackPrompt.trim()
+      ? fallbackPrompt.trim()
+      : typeof promptInput?.value === 'string'
+        ? promptInput.value.trim()
+        : '';
+  const typed = candidate;
+  if (typed) {
+    return typed;
+  }
+  const messages = Array.isArray(state.currentChat?.messages) ? state.currentChat.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === 'user' && typeof message.content === 'string' && message.content.trim()) {
+      return message.content.trim();
+    }
+  }
+  return '';
+}
+
+function resolveChatPrimaryGoal() {
+  if (state.currentChat?.initialUserPrompt && state.currentChat.initialUserPrompt.trim()) {
+    return state.currentChat.initialUserPrompt.trim();
+  }
+  const messages = Array.isArray(state.currentChat?.messages) ? state.currentChat.messages : [];
+  const firstUser = messages.find(
+    (message) => message?.role === 'user' && typeof message.content === 'string' && message.content.trim()
+  );
+  return firstUser ? firstUser.content.trim() : '';
+}
+
+function handleDeepResearchProgress(payload) {
+  if (!payload || !payload.requestId) {
+    return;
+  }
+  if (payload.requestId !== state.deepResearch.requestId) {
+    return;
+  }
+
+  const next = {
+    ...state.deepResearch,
+    stage: payload.stage || state.deepResearch.stage,
+    message: payload.message || state.deepResearch.message,
+    iteration:
+      Number.isFinite(payload.iteration) && payload.iteration > 0
+        ? Number(payload.iteration)
+        : state.deepResearch.iteration,
+    totalIterations:
+      Number.isFinite(payload.totalIterations) && payload.totalIterations > 0
+        ? Number(payload.totalIterations)
+        : state.deepResearch.totalIterations,
+    lastUpdated: Date.now(),
+    log: appendDeepResearchLog(state.deepResearch.log, payload),
+  };
+  if (typeof payload.answer === 'string' && payload.answer.trim()) {
+    next.answer = payload.answer.trim();
+  }
+
+  if (
+    payload.stage === 'iteration-start' ||
+    payload.stage === 'iteration-review' ||
+    payload.stage === 'iteration-error' ||
+    payload.stage === 'iteration-reflection' ||
+    payload.stage === 'model-draft' ||
+    payload.stage === 'model-eval' ||
+    payload.stage === 'model-error' ||
+    (Array.isArray(payload.findings) && payload.findings.length)
+  ) {
+    next.timeline = upsertDeepResearchTimelineEntry(next.timeline, {
+      iteration: Number(payload.iteration),
+      query: payload.query,
+      findings: Array.isArray(payload.findings) ? payload.findings : undefined,
+      statusStage: payload.stage,
+      message: payload.message,
+      review: payload.review,
+      answer: payload.answer,
+      verdict: payload.verdict,
+      reviewNotes: payload.reviewNotes,
+    });
+  }
+
+  if (payload.stage === 'complete') {
+    next.running = false;
+    next.error = null;
+    if (payload.summary) {
+      next.summary = payload.summary;
+    }
+    if (Array.isArray(payload.sources)) {
+      next.sources = payload.sources;
+    }
+  } else if (payload.stage === 'error') {
+    next.running = false;
+    next.error = payload.message || 'Deep research failed.';
+  }
+
+  next.statusLine = next.running ? formatDeepResearchStatusLine(payload, next) : '';
+
+  state.deepResearch = next;
+  updateDeepResearchShelf();
+  updateInteractivity();
+  updateDeepResearchLiveOutput();
+  syncDeepResearchStatusLine();
+}
+
+function upsertDeepResearchTimelineEntry(timeline = [], update = {}) {
+  if (!Number.isFinite(update.iteration)) {
+    return Array.isArray(timeline) ? timeline : [];
+  }
+  const list = Array.isArray(timeline) ? [...timeline] : [];
+  const iteration = Number(update.iteration);
+  const index = list.findIndex((entry) => entry.iteration === iteration);
+  const existing = index >= 0 ? list[index] : null;
+
+  const preserveMessage = update.statusStage === 'iteration-reflection';
+  const entry = {
+    iteration,
+    query: update.query || existing?.query || '',
+    findings: Array.isArray(update.findings)
+      ? update.findings.slice(0, 3)
+      : existing?.findings || [],
+    status: mapDeepResearchStageToStatus(update.statusStage, existing?.status),
+    message: preserveMessage ? existing?.message || '' : update.message || existing?.message || '',
+    review: existing?.review || '',
+    answer: existing?.answer || '',
+    verdict: existing?.verdict || '',
+    reviewNotes: existing?.reviewNotes || '',
+  };
+
+  if (typeof update.review === 'string' && update.review.trim()) {
+    entry.review = update.review.trim();
+  }
+  if (typeof update.answer === 'string' && update.answer.trim()) {
+    entry.answer = update.answer.trim();
+  }
+  if (typeof update.verdict === 'string' && update.verdict.trim()) {
+    entry.verdict = update.verdict.trim();
+  }
+  if (typeof update.reviewNotes === 'string' && update.reviewNotes.trim()) {
+    entry.reviewNotes = update.reviewNotes.trim();
+  }
+
+  if (index >= 0) {
+    list[index] = entry;
+  } else {
+    list.push(entry);
+  }
+
+  list.sort((a, b) => a.iteration - b.iteration);
+  return list;
+}
+
+function mapDeepResearchStageToStatus(stage, fallback = 'pending') {
+  switch (stage) {
+    case 'iteration-start':
+      return 'active';
+    case 'iteration-review':
+    case 'iteration-reflection':
+    case 'model-eval':
+      return 'complete';
+    case 'iteration-error':
+    case 'model-error':
+      return 'error';
+    case 'model-draft':
+      return 'active';
+    default:
+      return fallback || 'pending';
+  }
+}
+
+function updateDeepResearchShelf() {
+  if (!deepResearchShelf) {
+    return;
+  }
+
+  const hasContent =
+    state.deepResearch.running ||
+    Boolean(state.deepResearch.summary) ||
+    Boolean(state.deepResearch.error) ||
+    (Array.isArray(state.deepResearch.timeline) && state.deepResearch.timeline.length > 0);
+
+  if (!hasContent) {
+    deepResearchShelf.classList.add('hidden');
+    renderDeepResearchTimeline();
+    renderDeepResearchSummary();
+    updateDeepResearchButtons();
+    updateDeepResearchDetailsVisibility();
+    return;
+  }
+
+  deepResearchShelf.classList.remove('hidden');
+  if (deepResearchHeadline) {
+    deepResearchHeadline.textContent = state.deepResearch.running
+      ? formatDeepResearchHeadline(state.deepResearch.topic)
+      : 'Deep research ready';
+  }
+  if (deepResearchStageLabel) {
+    if (state.deepResearch.error) {
+      deepResearchStageLabel.textContent = state.deepResearch.error;
+    } else if (state.deepResearch.message) {
+      deepResearchStageLabel.textContent = state.deepResearch.message;
+    } else if (state.deepResearch.running) {
+      deepResearchStageLabel.textContent = 'Gathering multi-source evidence…';
+    } else {
+      deepResearchStageLabel.textContent = 'Review findings before sending.';
+    }
+  }
+
+  renderDeepResearchTimeline();
+  renderDeepResearchSummary();
+  updateDeepResearchButtons();
+}
+
+function renderDeepResearchTimeline() {
+  if (!deepResearchTimeline) {
+    return;
+  }
+  deepResearchTimeline.innerHTML = '';
+  const entries = Array.isArray(state.deepResearch.timeline) ? state.deepResearch.timeline : [];
+  if (!entries.length) {
+    deepResearchTimeline.classList.add('hidden');
+    updateDeepResearchDetailsVisibility();
+    return;
+  }
+  deepResearchTimeline.classList.remove('hidden');
+  entries.forEach((entry) => {
+    const item = document.createElement('li');
+    item.classList.add(entry.status || 'pending');
+
+    const title = document.createElement('strong');
+    const iterationLabel = Number.isFinite(entry.iteration) ? entry.iteration : '–';
+    title.textContent = `Pass ${iterationLabel}`;
+    item.appendChild(title);
+
+    const meta = document.createElement('small');
+    const messageParts = [];
+    if (entry.query) {
+      messageParts.push(`Query: ${entry.query}`);
+    }
+    if (entry.message) {
+      messageParts.push(entry.message);
+    }
+    meta.textContent = messageParts.join(' • ');
+    item.appendChild(meta);
+
+    if (Array.isArray(entry.findings) && entry.findings.length) {
+      const list = document.createElement('ul');
+      list.classList.add('deep-research-findings');
+      entry.findings.slice(0, 2).forEach((finding) => {
+        const li = document.createElement('li');
+        const label = finding.title || finding.summary || finding.url || 'Source';
+        li.textContent = label;
+        list.appendChild(li);
+      });
+      item.appendChild(list);
+    }
+
+    if (entry.review) {
+      const review = document.createElement('p');
+      review.classList.add('deep-research-review');
+      review.textContent = entry.review;
+      item.appendChild(review);
+    }
+
+    if (entry.answer) {
+      const draft = document.createElement('p');
+      draft.classList.add('deep-research-draft');
+      draft.textContent =
+        entry.answer.length > 320 ? `${entry.answer.slice(0, 317)}…` : entry.answer;
+      item.appendChild(draft);
+    }
+
+    if (entry.verdict || entry.reviewNotes) {
+      const verdict = document.createElement('p');
+      verdict.classList.add('deep-research-verdict');
+      if (entry.verdict === 'good') {
+        verdict.classList.add('approved');
+      } else if (entry.verdict) {
+        verdict.classList.add('needs-work');
+      }
+      verdict.textContent = entry.reviewNotes
+        ? `Reviewer: ${entry.reviewNotes}`
+        : entry.verdict
+          ? `Reviewer verdict: ${entry.verdict}`
+          : 'Reviewer feedback recorded.';
+      item.appendChild(verdict);
+    }
+
+    deepResearchTimeline.appendChild(item);
+  });
+  if (deepResearchDetails && state.deepResearch.running) {
+    deepResearchDetails.open = true;
+  }
+  updateDeepResearchDetailsVisibility();
+}
+
+function renderDeepResearchSummary() {
+  if (!deepResearchSummaryCard || !deepResearchSummaryText) {
+    return;
+  }
+  const summaryText = buildDeepResearchSummaryDisplay();
+  const hasSummary = Boolean(summaryText);
+  if (!hasSummary) {
+    deepResearchSummaryCard.classList.add('hidden');
+    deepResearchSummaryText.textContent = '';
+    if (deepResearchInsertButton) {
+      deepResearchInsertButton.disabled = true;
+    }
+    if (deepResearchCopyButton) {
+      deepResearchCopyButton.disabled = true;
+    }
+    updateDeepResearchDetailsVisibility();
+    return;
+  }
+
+  deepResearchSummaryCard.classList.remove('hidden');
+  deepResearchSummaryText.textContent = summaryText;
+  if (deepResearchInsertButton) {
+    deepResearchInsertButton.disabled = false;
+  }
+  if (deepResearchCopyButton) {
+    deepResearchCopyButton.disabled = false;
+  }
+  updateDeepResearchDetailsVisibility();
+}
+
+function updateDeepResearchDetailsVisibility() {
+  if (!deepResearchDetails) {
+    return;
+  }
+  const timelineVisible = deepResearchTimeline && !deepResearchTimeline.classList.contains('hidden');
+  const summaryVisible = deepResearchSummaryCard && !deepResearchSummaryCard.classList.contains('hidden');
+  const shouldShow = timelineVisible || summaryVisible;
+  if (!shouldShow) {
+    deepResearchDetails.classList.add('hidden');
+    deepResearchDetails.open = false;
+  } else {
+    deepResearchDetails.classList.remove('hidden');
+  }
+}
+
+function updateDeepResearchButtons() {
+  const isActive = Boolean(state.deepResearch.enabled);
+  const buttons = [composerDeepResearchButton];
+  buttons.forEach((btn) => {
+    if (!btn) {
+      return;
+    }
+    btn.classList.toggle('is-active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+}
+
+function formatDeepResearchHeadline(topic) {
+  const trimmed = typeof topic === 'string' ? topic.trim() : '';
+  if (!trimmed) {
+    return 'Deep research';
+  }
+  if (trimmed.length <= 52) {
+    return `Deep research on "${trimmed}"`;
+  }
+  return `Deep research on "${trimmed.slice(0, 49)}..."`;
+}
+
+async function handleDeepResearchCopy() {
+  const summary = buildDeepResearchSummaryDisplay();
+  if (!summary) {
+    return;
+  }
+  try {
+    if (navigator?.clipboard?.writeText) {
+      await navigator.clipboard.writeText(summary);
+    } else {
+      throw new Error('Clipboard API unavailable');
+    }
+    showToast('Deep research summary copied.', { variant: 'info' });
+  } catch (err) {
+    try {
+      const fallback = document.createElement('textarea');
+      fallback.value = summary;
+      fallback.setAttribute('readonly', '');
+      fallback.style.position = 'absolute';
+      fallback.style.left = '-9999px';
+      document.body.appendChild(fallback);
+      fallback.select();
+      document.execCommand('copy');
+      document.body.removeChild(fallback);
+      showToast('Deep research summary copied.', { variant: 'info' });
+    } catch (copyError) {
+      console.error('Failed to copy deep research summary:', copyError);
+      showToast('Copy failed. Select the findings text manually.', { variant: 'warning' });
+    }
+  }
+}
+
+function handleDeepResearchInsert() {
+  const payload = buildDeepResearchSummaryDisplay();
+  if (!promptInput || !payload) {
+    return;
+  }
+  const block = `[Deep Research Findings]\n${payload}`;
+  const existing = typeof promptInput.value === 'string' ? promptInput.value.trimEnd() : '';
+  promptInput.value = existing ? `${existing}\n\n${block}\n` : `${block}\n`;
+  promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+  promptInput.focus();
+  showToast('Inserted deep research findings into the prompt.', { variant: 'info' });
+}
+
+function buildDeepResearchSummaryDisplay() {
+  const parts = [];
+  if (state.deepResearch.answer && state.deepResearch.answer.trim()) {
+    parts.push(`Preliminary response:\n${state.deepResearch.answer.trim()}`);
+  }
+  if (state.deepResearch.summary && state.deepResearch.summary.trim()) {
+    parts.push(state.deepResearch.summary.trim());
+  }
+  return parts.join('\n\n').trim();
+}
+
+function dismissDeepResearchShelf() {
+  if (state.deepResearch.running) {
+    return;
+  }
+  const enabled = Boolean(state.deepResearch.enabled);
+  const chatId = state.deepResearch.chatId || null;
+  state.deepResearch = { ...createDeepResearchState(), enabled, chatId };
+  updateDeepResearchShelf();
+  updateDeepResearchButtons();
+  updateInteractivity();
+}
+
+function maybeResetDeepResearchForChat(chatId) {
+  if (!chatId) {
+    return;
+  }
+  if (state.deepResearch.chatId === chatId) {
+    return;
+  }
+  state.deepResearch = { ...createDeepResearchState(), chatId };
+  updateDeepResearchButtons();
+  updateDeepResearchShelf();
+}
+
+function renderNoModelsPlaceholder() {
+  if (modelSelect) {
     modelSelect.innerHTML = '';
     const option = document.createElement('option');
-    option.textContent = `Unable to reach Ollama at ${endpoint}`;
+    option.textContent = '';
     option.value = '';
     option.disabled = true;
     option.selected = true;
     modelSelect.appendChild(option);
-    showToast(`Unable to reach Ollama at ${endpoint}. Ensure it is running and click refresh.`, {
+  }
+  state.models = [];
+  renderModelPickerMenu([]);
+  updateModelPickerDisplay();
+  setModelPickerDisabled(true);
+}
+
+function formatModelPickerLabel(name, maxChars = MODEL_LABEL_CHAR_LIMIT) {
+  if (typeof name !== 'string' || !name.trim()) {
+    return '';
+  }
+  if (name.length <= maxChars) {
+    return name;
+  }
+  const limit = Math.max(maxChars - 1, 1);
+  return `${name.slice(0, limit)}…`;
+}
+
+function setModelPickerDisabled(disabled) {
+  if (!modelPickerButton) {
+    return;
+  }
+  const isDisabled = Boolean(disabled);
+  modelPickerButton.disabled = isDisabled;
+  if (isDisabled) {
+    modelPickerButton.setAttribute('aria-disabled', 'true');
+  } else {
+    modelPickerButton.removeAttribute('aria-disabled');
+  }
+  if (disabled) {
+    closeModelPickerMenu({ focusButton: false });
+  }
+}
+
+function updateModelPickerDisplay() {
+  if (!modelPickerButton || !modelPickerCurrent) {
+    return;
+  }
+  const currentValue = modelSelect?.value || '';
+  const hasModels = Boolean(state.models?.length);
+  const baseLabel = hasModels ? 'Select a model' : 'No models found';
+  if (!currentValue) {
+    modelPickerCurrent.textContent = baseLabel;
+    modelPickerButton.title = baseLabel;
+    return;
+  }
+  const truncated = formatModelPickerLabel(currentValue);
+  modelPickerCurrent.textContent = truncated || currentValue;
+  modelPickerButton.title = currentValue;
+}
+
+function renderModelPickerMenu(models = []) {
+  if (!modelPickerMenu) {
+    return;
+  }
+  const wasOpen = modelPickerOpen;
+  if (wasOpen) {
+    closeModelPickerMenu({ focusButton: false });
+  }
+  modelPickerMenu.innerHTML = '';
+  if (!models.length) {
+    const empty = document.createElement('p');
+    empty.className = 'model-picker-empty';
+    empty.textContent = 'No models available';
+    modelPickerMenu.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  models.forEach((name) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'model-picker-option';
+    option.setAttribute('role', 'option');
+    option.setAttribute('tabindex', '-1');
+    option.dataset.value = name;
+    option.textContent = name;
+    fragment.appendChild(option);
+  });
+  modelPickerMenu.appendChild(fragment);
+  syncModelPickerSelection();
+}
+
+function syncModelPickerSelection(scrollIntoView = false) {
+  if (!modelPickerMenu) {
+    return;
+  }
+  const options = modelPickerMenu.querySelectorAll('.model-picker-option');
+  const value = modelSelect?.value || '';
+  let nextActiveIndex = -1;
+  options.forEach((option, index) => {
+    const isSelected = option.dataset.value === value;
+    option.classList.toggle('selected', isSelected);
+    option.setAttribute('aria-selected', String(isSelected));
+    if (isSelected) {
+      nextActiveIndex = index;
+      if (scrollIntoView) {
+        option.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  });
+  modelPickerActiveIndex = nextActiveIndex;
+  options.forEach((option, index) => {
+    option.classList.toggle('active', index === modelPickerActiveIndex);
+  });
+}
+
+function handleModelPickerSelection(value) {
+  if (!value || !modelSelect) {
+    return;
+  }
+  if (modelSelect.value === value) {
+    updateModelPickerDisplay();
+    closeModelPickerMenu({ focusButton: true });
+    return;
+  }
+  modelSelect.value = value;
+  updateModelPickerDisplay();
+  syncModelPickerSelection();
+  closeModelPickerMenu({ focusButton: true });
+}
+
+function openModelPickerMenu() {
+  if (!modelPickerMenu || !modelPickerButton || modelPickerOpen || modelPickerButton.disabled) {
+    return;
+  }
+  if (!state.models?.length) {
+    return;
+  }
+  modelPickerMenu.classList.remove('hidden');
+  modelPickerMenu.setAttribute('aria-hidden', 'false');
+  modelPickerButton.setAttribute('aria-expanded', 'true');
+  modelPickerOpen = true;
+  syncModelPickerSelection(true);
+  focusModelPickerOption(modelPickerActiveIndex >= 0 ? modelPickerActiveIndex : 0);
+  document.addEventListener('pointerdown', handleModelPickerPointerDown, true);
+  document.addEventListener('keydown', handleModelPickerEscape, true);
+}
+
+function closeModelPickerMenu({ focusButton = false } = {}) {
+  if (!modelPickerMenu || !modelPickerOpen) {
+    return;
+  }
+  modelPickerMenu.classList.add('hidden');
+  modelPickerMenu.setAttribute('aria-hidden', 'true');
+  if (modelPickerButton) {
+    modelPickerButton.setAttribute('aria-expanded', 'false');
+  }
+  modelPickerOpen = false;
+  document.removeEventListener('pointerdown', handleModelPickerPointerDown, true);
+  document.removeEventListener('keydown', handleModelPickerEscape, true);
+  if (focusButton && modelPickerButton) {
+    modelPickerButton.focus();
+  }
+}
+
+function focusModelPickerOption(index) {
+  if (!modelPickerMenu) {
+    return;
+  }
+  const options = modelPickerMenu.querySelectorAll('.model-picker-option');
+  if (!options.length) {
+    return;
+  }
+  let targetIndex = index;
+  if (!Number.isFinite(targetIndex) || targetIndex < 0) {
+    targetIndex = 0;
+  }
+  if (targetIndex >= options.length) {
+    targetIndex = options.length - 1;
+  }
+  const targetOption = options[targetIndex];
+  targetOption.focus();
+  modelPickerActiveIndex = targetIndex;
+  options.forEach((option, idx) => {
+    option.classList.toggle('active', idx === modelPickerActiveIndex);
+  });
+}
+
+function handleModelPickerPointerDown(event) {
+  if (!modelPickerOpen) {
+    return;
+  }
+  const target = event.target;
+  if (modelPickerButton?.contains(target) || modelPickerMenu?.contains(target)) {
+    return;
+  }
+  closeModelPickerMenu();
+}
+
+function handleModelPickerEscape(event) {
+  if (!modelPickerOpen) {
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeModelPickerMenu({ focusButton: true });
+  }
+}
+
+function handleModelPickerButtonKeydown(event) {
+  if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    openModelPickerMenu();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!modelPickerOpen) {
+      openModelPickerMenu();
+      focusModelPickerOption(state.models.length - 1);
+    }
+  }
+}
+
+function handleModelPickerMenuKeydown(event) {
+  if (!modelPickerOpen) {
+    return;
+  }
+  const options = modelPickerMenu?.querySelectorAll('.model-picker-option') || [];
+  if (!options.length) {
+    return;
+  }
+  switch (event.key) {
+    case 'ArrowDown':
+      event.preventDefault();
+      focusModelPickerOption(Math.min(modelPickerActiveIndex + 1, options.length - 1));
+      break;
+    case 'ArrowUp':
+      event.preventDefault();
+      focusModelPickerOption(Math.max(modelPickerActiveIndex - 1, 0));
+      break;
+    case 'Home':
+      event.preventDefault();
+      focusModelPickerOption(0);
+      break;
+    case 'End':
+      event.preventDefault();
+      focusModelPickerOption(options.length - 1);
+      break;
+    case 'Enter':
+    case ' ':
+      event.preventDefault();
+      if (modelPickerActiveIndex >= 0 && modelPickerActiveIndex < options.length) {
+        const value = options[modelPickerActiveIndex].dataset.value;
+        handleModelPickerSelection(value);
+      }
+      break;
+    case 'Tab':
+      closeModelPickerMenu();
+      break;
+    default:
+      break;
+  }
+}
+
+async function populateModels() {
+  setModelControlsDisabled(true);
+  if (modelPickerCurrent) {
+    modelPickerCurrent.textContent = 'Loading models…';
+  }
+  if (modelPickerButton) {
+    modelPickerButton.title = 'Loading models…';
+  }
+  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  const usingChatCompat = Boolean(state.settings?.useOpenAICompatibleEndpoint);
+  const providerLabel = usingChatCompat ? 'ChatGPT-compatible endpoint' : 'Ollama server';
+  const providerShort = usingChatCompat ? 'ChatGPT-compatible endpoint' : 'Ollama';
+  const providerStatus = usingChatCompat ? 'ChatGPT-compatible API endpoint' : 'Ollama server';
+  updateModelStatus(`Checking ${providerStatus}…`, 'loading');
+
+  try {
+    const modelsResponse = await window.api.getModels();
+    modelSelect.innerHTML = '';
+    const models = Array.isArray(modelsResponse) ? modelsResponse : [];
+    state.models = models;
+
+    if (!state.models.length) {
+      renderNoModelsPlaceholder();
+      const toastMessage = usingChatCompat
+        ? `No models were reported by your ${providerShort} at ${endpoint}. Confirm it exposes /v1/models and refresh.`
+        : `No Ollama models detected at ${endpoint}. Start Ollama and refresh.`;
+      showToast(toastMessage, {
+        variant: 'warning',
+        duration: 8000,
+      });
+      updateModelStatus(`No models detected at ${endpoint}.`, 'warning');
+      trackAnalyticsEvent('models_missing', {
+        provider: providerShort,
+        using_chat_compat: usingChatCompat,
+        reason: 'empty-response',
+        error_type: 'models_missing',
+      });
+      return;
+    }
+
+    const previousValue = modelSelect.value;
+    const fragment = document.createDocumentFragment();
+    state.models.forEach((name) => {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      fragment.appendChild(option);
+    });
+    modelSelect.appendChild(fragment);
+    if (previousValue && state.models.includes(previousValue)) {
+      modelSelect.value = previousValue;
+    } else {
+      modelSelect.value = state.models[0];
+    }
+
+    renderModelPickerMenu(state.models);
+    updateModelPickerDisplay();
+    setModelPickerDisabled(false);
+    trackAnalyticsEvent('models_refreshed', {
+      model_count: state.models.length,
+      restored_previous_selection: Boolean(previousValue && modelSelect.value === previousValue),
+      using_chat_compat: usingChatCompat,
+    });
+
+    const countLabel = state.models.length === 1 ? 'model' : 'models';
+    updateModelStatus(`Connected: ${state.models.length} ${countLabel} available via ${providerStatus}.`, 'success');
+  } catch (err) {
+    console.error(err);
+    renderNoModelsPlaceholder();
+    const toastMessage = usingChatCompat
+      ? `Unable to reach your ${providerLabel} at ${endpoint}. Make sure it is running and implements the ChatGPT API.`
+      : `Unable to reach Ollama at ${endpoint}. Ensure it is running and click refresh.`;
+    showToast(toastMessage, {
       variant: 'warning',
       duration: 8000,
+    });
+    updateModelStatus(`Unable to reach ${providerLabel} at ${endpoint}.`, 'error');
+    trackAnalyticsEvent('models_refresh_failed', {
+      provider: providerLabel,
+      using_chat_compat: usingChatCompat,
+      error: formatErrorForAnalytics(err),
+      error_type: 'models_refresh_failed',
     });
   } finally {
     setModelControlsDisabled(false);
@@ -1325,11 +2840,16 @@ async function handlePromptSubmit() {
 
   const chatId = state.currentChatId;
   const model = modelSelect.value;
+  state.webSearchStartedAt = null;
+  state.lastWebSearchDurationMs = null;
+  state.lastAttachmentIngestDurationMs = null;
 
   if (!model) {
-    modelSelect.classList.add('attention');
-    modelSelect.focus();
-    setTimeout(() => modelSelect.classList.remove('attention'), 800);
+    if (modelPickerButton) {
+      modelPickerButton.classList.add('attention');
+      modelPickerButton.focus();
+      setTimeout(() => modelPickerButton.classList.remove('attention'), 800);
+    }
     return;
   }
 
@@ -1353,19 +2873,34 @@ async function handlePromptSubmit() {
     model,
     prompt_chars: prompt.length,
     attachments: state.attachments.length,
+    deep_research_enabled: Boolean(state.deepResearch.enabled),
   });
 
+  state.stopRequested = false;
   state.isStreaming = true;
   updateInteractivity();
   const hasAttachments = state.attachments.length > 0;
   stopAttachmentStatusTimer();
   if (hasAttachments) {
+    state.lastAttachmentIngestDurationMs = null;
     state.attachmentProcessingStartedAt = Date.now();
     startAttachmentStatusTimer();
+  } else {
+    state.lastAttachmentIngestDurationMs = null;
   }
   renderAttachmentList();
 
   const requestId = createRequestId();
+  state.lastPromptMetrics = {
+    requestId,
+    promptChars: prompt.length,
+    attachmentsCount: state.attachments.length,
+    attachmentsBytes: state.attachmentBytes,
+    startedAt: Date.now(),
+    model,
+    chatId,
+    deepResearchEnabled: Boolean(state.deepResearch.enabled),
+  };
   const userLinks = extractLinks(prompt);
 
   const assistantEntry = appendAssistantMessage('', {
@@ -1375,25 +2910,6 @@ async function handlePromptSubmit() {
     loading: true,
     loadingStatus: 'Loading model…',
   });
-
-  const stopButton = document.createElement('button');
-  stopButton.type = 'button';
-  stopButton.classList.add('stop-generation-btn');
-  stopButton.textContent = 'Stop';
-  stopButton.setAttribute('aria-label', 'Stop generating response');
-  stopButton.addEventListener('click', () => {
-    if (stopButton.disabled) {
-      return;
-    }
-    stopButton.disabled = true;
-    stopButton.textContent = 'Stopping…';
-    stopGeneration(requestId).catch((err) => {
-      console.error('Failed to cancel generation:', err);
-      stopButton.disabled = false;
-      stopButton.textContent = 'Stop';
-    });
-  });
-  assistantEntry.addActionButton(stopButton);
   assistantEntry.__autoOpenedReasoning = false;
 
   state.pendingAssistantByChat.set(chatId, assistantEntry);
@@ -1401,6 +2917,26 @@ async function handlePromptSubmit() {
   state.activeAssistantEntry = assistantEntry;
 
   try {
+    let deepResearchPayload = null;
+    if (state.deepResearch.enabled) {
+      deepResearchPayload = await runDeepResearchSequence(prompt, model);
+    }
+
+    if (state.stopRequested) {
+      assistantEntry.clearActions();
+      assistantEntry.stopLoading?.();
+      assistantEntry.setSummary('Canceled');
+      state.pendingAssistantByChat.delete(chatId);
+      state.isStreaming = false;
+      state.activeRequestId = null;
+      state.activeAssistantEntry = null;
+      updateInteractivity();
+      stopAttachmentStatusTimer();
+      renderAttachmentList();
+      consumePromptAnalyticsSnapshot();
+      return;
+    }
+
     const result = await window.api.askOllama({
       chatId,
       model,
@@ -1408,6 +2944,7 @@ async function handlePromptSubmit() {
       requestId,
       userLinks,
       attachments: attachmentsPayload,
+      deepResearch: deepResearchPayload,
     });
 
     assistantEntry.clearActions();
@@ -1421,6 +2958,7 @@ async function handlePromptSubmit() {
       updateInteractivity();
       stopAttachmentStatusTimer();
       renderAttachmentList();
+      consumePromptAnalyticsSnapshot();
       return;
     }
 
@@ -1436,28 +2974,35 @@ async function handlePromptSubmit() {
       updateInteractivity();
       stopAttachmentStatusTimer();
       renderAttachmentList();
-      trackAnalyticsEvent('response_error', {
-        type: 'model_error',
-        message: String(result.error || '').slice(0, 120),
+      trackResponseErrorAnalytics('model_error', String(result.error || ''), {
+        model,
+        timing: result.timing,
       });
       return;
     }
 
     const reasoningText = result.reasoning?.trim() || '';
     const hasContext = Boolean(result.context);
-    const contextSummary = hasContext ? 'Web Context' : 'Context';
+    const usesDeepResearch =
+      result.deepResearch &&
+      (result.deepResearch.summary ||
+        result.deepResearch.answer ||
+        (Array.isArray(result.deepResearch.sources) && result.deepResearch.sources.length > 0));
+    const contextSummary = usesDeepResearch ? 'Deep research notes & timing' : hasContext ? 'Web Context' : 'Context';
 
     assistantEntry.setSummary(contextSummary);
     if (reasoningText) {
       assistantEntry.setReasoning(reasoningText);
     }
-    const contextMessage = result.usedWebSearch
-      ? 'Web search context applied to compose the answer.'
-      : result.reusedConversationMemory
-        ? 'Relied on earlier conversation and cached context.'
-        : result.context
-          ? 'Included user-provided references.'
-          : 'No additional context used.';
+    const contextMessage = usesDeepResearch
+      ? 'Deep research findings captured before this response.'
+      : result.usedWebSearch
+        ? 'Web search context applied to compose the answer.'
+        : result.reusedConversationMemory
+          ? 'Relied on earlier conversation and cached context.'
+          : result.context
+            ? 'Included user-provided references.'
+            : 'No additional context used.';
     assistantEntry.setThought(
       formatContextThought({
         message: contextMessage,
@@ -1495,6 +3040,7 @@ async function handlePromptSubmit() {
         attachmentWarnings: result.attachmentWarnings,
         timing: result.timing,
         supportsReasoning: result.supportsReasoning,
+        deepResearch: result.deepResearch,
       },
       model
     );
@@ -1503,8 +3049,8 @@ async function handlePromptSubmit() {
     updateInteractivity();
     stopAttachmentStatusTimer();
     renderAttachmentList();
+    trackResponseCompletedAnalytics(result, { model, usedDeepResearch: usesDeepResearch });
     await refreshChatList(chatId);
-    updateChatTitle();
   } catch (err) {
     console.error(err);
     assistantEntry.clearActions();
@@ -1519,9 +3065,8 @@ async function handlePromptSubmit() {
     updateInteractivity();
     stopAttachmentStatusTimer();
     renderAttachmentList();
-    trackAnalyticsEvent('response_error', {
-      type: 'exception',
-      message: String(err?.message || err || 'Unknown error').slice(0, 120),
+    trackResponseErrorAnalytics('exception', String(err?.message || err || 'Unknown error'), {
+      model,
     });
   }
 }
@@ -1542,11 +3087,13 @@ async function handleNewChat() {
     model: chat.model,
     createdAt: chat.createdAt,
     updatedAt: chat.updatedAt,
+    initialUserPrompt: chat.initialUserPrompt || '',
   });
   renderChatList(chat.id);
   stopAttachmentStatusTimer();
   setCurrentChatAttachments(chat.attachments || [], { persist: false });
   renderChat(chat);
+  maybeResetDeepResearchForChat(chat.id);
   promptInput.focus();
   trackAnalyticsEvent('chat_created', {
     chat_count: state.chats.length,
@@ -1574,18 +3121,20 @@ async function selectChat(chatId) {
   stopAttachmentStatusTimer();
   setCurrentChatAttachments(chat.attachments || [], { persist: false });
   renderChat(chat);
+  maybeResetDeepResearchForChat(chat.id);
 }
 
 function renderChat(chat) {
-  updateChatTitle();
   if (!chat.messages?.length) {
     chatArea.innerHTML = '';
     const empty = document.createElement('div');
     empty.classList.add('empty-state');
     empty.innerHTML = `
-      <h2 class="empty-title">DioxideAi</h2>
-      <p>Start a conversation by selecting a model and asking a question.</p>
-      <small>Your chats are private and only stored on your device.</small>
+      <div class="empty-copy">
+        <h2>Ready when you are</h2>
+        <p>Select a model, drop in context, then ask anything.</p>
+        <p>Your conversations stay private.</p>
+      </div>
     `;
     chatArea.appendChild(empty);
     return;
@@ -1597,11 +3146,16 @@ function renderChat(chat) {
       appendUserMessage(message.content);
     } else {
       const usedWeb = Boolean(message.meta?.usedWebSearch);
+      const usedDeepResearch =
+        message.meta?.deepResearch &&
+        (message.meta.deepResearch.summary ||
+          message.meta.deepResearch.answer ||
+          (Array.isArray(message.meta.deepResearch.sources) && message.meta.deepResearch.sources.length > 0));
       const storedThought = formatStoredContext(message.meta || {});
       const entry = appendAssistantMessage(message.content, {
         open: state.settings?.openThoughtsByDefault ?? false,
         thoughts: storedThought.context,
-        summary: usedWeb ? 'Web Context' : 'Context',
+        summary: usedDeepResearch ? 'Deep research notes & timing' : usedWeb ? 'Web Context' : 'Context',
       });
       if (storedThought.reasoning) {
         entry.setReasoning(storedThought.reasoning);
@@ -1649,6 +3203,7 @@ function renderChatList(activeId) {
 }
 
 function appendUserMessage(content) {
+  removeEmptyState();
   const container = document.createElement('div');
   container.classList.add('message', 'user');
 
@@ -1663,6 +3218,7 @@ function appendUserMessage(content) {
 }
 
 function appendAssistantMessage(content, options = {}) {
+  removeEmptyState();
   const openDefault = state.settings?.openThoughtsByDefault ?? false;
   const {
     open = openDefault,
@@ -1863,6 +3419,13 @@ function recordUserMessage(content) {
     content,
     createdAt: new Date().toISOString(),
   });
+  if (!state.currentChat.initialUserPrompt) {
+    state.currentChat.initialUserPrompt = content;
+    const summary = state.chats.find((chat) => chat.id === state.currentChatId);
+    if (summary) {
+      summary.initialUserPrompt = content;
+    }
+  }
   if (!state.currentChat.title || state.currentChat.title === 'New Chat') {
     state.currentChat.title = truncate(content, 60);
     const summary = state.chats.find((chat) => chat.id === state.currentChatId);
@@ -1870,7 +3433,6 @@ function recordUserMessage(content) {
       summary.title = state.currentChat.title;
     }
     renderChatList(state.currentChatId);
-    updateChatTitle();
   }
 }
 
@@ -1922,6 +3484,10 @@ function recordAssistantMessage(content, contextData, model) {
     meta.attachmentWarnings = contextData.attachmentWarnings;
   }
 
+  if (contextData?.deepResearch) {
+    meta.deepResearch = contextData.deepResearch;
+  }
+
   state.currentChat.messages.push({
     role: 'assistant',
     content,
@@ -1938,26 +3504,26 @@ function recordAssistantMessage(content, contextData, model) {
   }
 }
 
-function updateChatTitle() {
-  if (!state.currentChat) {
-    chatTitleEl.textContent = '';
+function updateModelStatus(message, variant = 'info') {
+  if (!modelStatusText) {
     return;
   }
-
-  const title = state.currentChat.title || 'New Chat';
-  const model = state.currentChat.model || modelSelect.value || 'Select a model';
-  chatTitleEl.textContent = `${title} • ${model}`;
+  modelStatusText.textContent = message || '';
+  modelStatusText.setAttribute('data-variant', variant);
 }
 
 function setModelControlsDisabled(disabled) {
-  modelSelect.disabled = disabled;
-  refreshModelsButton.disabled = disabled;
+  if (modelSelect) {
+    modelSelect.disabled = disabled;
+  }
+  setModelPickerDisabled(Boolean(disabled) || !state.models?.length);
+  if (refreshModelsButton) {
+    refreshModelsButton.disabled = disabled;
+  }
 }
 
 function updateInteractivity() {
-  if (sendButton) {
-    sendButton.disabled = state.isStreaming;
-  }
+  syncSendButtonState();
   if (newChatButton) {
     newChatButton.disabled = state.isStreaming;
   }
@@ -1972,6 +3538,9 @@ function updateInteractivity() {
   }
   if (deleteAllChatsButton) {
     deleteAllChatsButton.disabled = state.isStreaming;
+  }
+  if (composerDeepResearchButton) {
+    composerDeepResearchButton.disabled = state.isStreaming;
   }
   if (state.isStreaming) {
     chatListNav.classList.add('disabled');
@@ -2134,16 +3703,23 @@ function formatTimingSummary(timing) {
 function formatStoredContext(meta = {}) {
   const hasQueries = Array.isArray(meta.contextQueries) && meta.contextQueries.length > 0;
   const hasLinks = Array.isArray(meta.userLinks) && meta.userLinks.length > 0;
+  const usedDeepResearch =
+    meta.deepResearch &&
+    (meta.deepResearch.summary ||
+      meta.deepResearch.answer ||
+      (Array.isArray(meta.deepResearch.sources) && meta.deepResearch.sources.length > 0));
   let context = meta.context;
 
   if ((!context || !context.trim()) && hasLinks) {
     context = ['User-provided links:', ...meta.userLinks.map((link) => `• ${link}`)].join('\n');
   }
 
-  const message = meta.usedWebSearch
-    ? 'Context used when drafting this reply.'
-    : meta.reusedConversationMemory
-      ? 'Relied on earlier conversation and stored context.'
+  const message = usedDeepResearch
+    ? 'Deep research findings captured before this reply.'
+    : meta.usedWebSearch
+      ? 'Context used when drafting this reply.'
+      : meta.reusedConversationMemory
+        ? 'Relied on earlier conversation and stored context.'
       : hasLinks
         ? 'User-provided links supplied by the user.'
         : hasQueries
@@ -2283,19 +3859,47 @@ function updateSidebarState(collapsed) {
   const next = Boolean(collapsed);
   state.sidebarCollapsed = next;
   document.body.classList.toggle('sidebar-collapsed', next);
+  if (sidebar) {
+    sidebar.setAttribute('aria-hidden', next ? 'true' : 'false');
+  }
   if (sidebarToggleBtn) {
     sidebarToggleBtn.setAttribute('aria-pressed', String(next));
     sidebarToggleBtn.textContent = next ? 'Show Chats' : 'Hide Chats';
   }
-  if (sidebarCollapseToggle && sidebarCollapseToggle.checked !== next) {
-    sidebarCollapseToggle.checked = next;
+}
+
+function handleSidebarOverlayDismiss(event) {
+  if (state.sidebarCollapsed || !sidebar) {
+    return;
   }
+  const target = event.target;
+  if (sidebar.contains(target)) {
+    return;
+  }
+  if (sidebarToggleBtn?.contains(target)) {
+    return;
+  }
+  updateSidebarState(true);
 }
 
 function applyTheme(themeSetting) {
-  document.body.classList.remove('theme-light', 'theme-dark', 'theme-cream');
+  if (typeof document === 'undefined' || !document.body) {
+    return;
+  }
+  const requested = themeSetting || DEFAULT_SETTINGS.theme;
+  const resolved = resolveTheme(requested);
+  document.body.classList.remove('theme-light', 'theme-dark');
+  document.body.classList.add(`theme-${resolved}`);
+  document.body.dataset.themePreference = requested;
 }
 
 function resolveTheme(themeSetting) {
+  const desired = themeSetting || DEFAULT_SETTINGS.theme;
+  if (desired === 'system') {
+    return prefersDark?.matches ? 'dark' : 'light';
+  }
+  if (desired === 'dark') {
+    return 'dark';
+  }
   return 'light';
 }

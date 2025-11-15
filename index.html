@@ -6,7 +6,7 @@
   <title>DioxideAi</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
-<body>
+<body class="sidebar-collapsed">
   <div class="app-shell">
     <aside id="sidebar" aria-label="Saved chats">
       <nav id="chatList" aria-label="Chat history"></nav>
@@ -16,11 +16,34 @@
       <header>
         <div class="model-controls">
           <button id="newChatBtn" type="button" aria-label="Start new chat">+ New Chat</button>
-          <label for="modelSelect">Model:</label>
-          <select id="modelSelect" aria-label="DioxideAi model selector"></select>
-          <button id="refreshModels" type="button" aria-label="Refresh models list">↻</button>
+          <div class="model-picker">
+            <label id="modelPickerLabel" for="modelPickerButton">Model:</label>
+            <div class="model-picker-field">
+              <button
+                id="modelPickerButton"
+                class="model-picker-button"
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-labelledby="modelPickerLabel modelPickerCurrent"
+                aria-controls="modelPickerMenu"
+                disabled
+              >
+                <span id="modelPickerCurrent" class="model-picker-current">Loading models…</span>
+                <span class="model-picker-caret" aria-hidden="true"></span>
+              </button>
+              <div
+                id="modelPickerMenu"
+                class="model-picker-menu hidden"
+                role="listbox"
+                tabindex="-1"
+                aria-labelledby="modelPickerLabel"
+                aria-hidden="true"
+              ></div>
+            </div>
+            <select id="modelSelect" aria-label="DioxideAi model selector" hidden aria-hidden="true"></select>
+          </div>
         </div>
-        <div id="chatTitle" aria-live="polite"></div>
         <div class="header-actions">
           <button
             id="sidebarToggleBtn"
@@ -31,16 +54,6 @@
             Hide Chats
           </button>
           <button
-            id="supportBtn"
-            type="button"
-            aria-haspopup="dialog"
-            aria-expanded="false"
-            aria-controls="supportPanel"
-            aria-label="Support DioxideAi"
-          >
-            ♡
-          </button>
-          <button
             id="settingsBtn"
             type="button"
             aria-haspopup="dialog"
@@ -48,15 +61,60 @@
             aria-controls="settingsPanel"
             aria-label="Open settings"
           >
-            ⚙︎
+            Settings
           </button>
         </div>
       </header>
 
+      <section
+        id="deepResearchShelf"
+        class="deep-research-shelf hidden"
+        aria-live="polite"
+        aria-atomic="false"
+      >
+        <div class="deep-research-status">
+          <div class="deep-research-orb" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div class="deep-research-status-copy">
+            <strong id="deepResearchHeadline">Deep research ready</strong>
+            <small id="deepResearchStage">Surface multi-pass findings before sending.</small>
+          </div>
+          <button id="deepResearchDismissBtn" type="button" class="deep-research-dismiss">
+            Hide
+          </button>
+        </div>
+        <details
+          id="deepResearchDetails"
+          class="deep-research-details hidden"
+          aria-live="polite"
+          aria-atomic="false"
+        >
+          <summary>View passes & findings</summary>
+          <ol
+            id="deepResearchTimeline"
+            class="deep-research-timeline"
+            aria-label="Deep research passes"
+          ></ol>
+          <div id="deepResearchSummaryCard" class="deep-research-summary hidden">
+            <header>
+              <strong>Findings</strong>
+              <div class="summary-actions">
+                <button id="deepResearchInsertBtn" type="button">Insert into prompt</button>
+                <button id="deepResearchCopyBtn" type="button">Copy</button>
+              </div>
+            </header>
+            <pre id="deepResearchSummaryText"></pre>
+          </div>
+        </details>
+      </section>
+
       <main id="chatArea" role="log" aria-live="polite" aria-label="Chat conversation"></main>
 
       <form id="inputForm" aria-label="Compose message">
-        <section
+        <div
           id="composer"
           class="composer"
           aria-describedby="attachmentHint"
@@ -67,19 +125,26 @@
           </div>
 
           <div class="attachment-toolbar">
-            <div class="attachment-actions">
-              <button
-                type="button"
-                id="attachBtn"
-                class="attachment-button"
-                aria-label="Attach local files"
-              >
-                📎 Attach…
-              </button>
-              <span id="attachmentHint" class="attachment-hint">
-                Up to 4 files • 512 KB each (max 1 MB total, 4,000 chars/file)
-              </span>
-            </div>
+          <div class="attachment-actions">
+            <button
+              type="button"
+              id="composerDeepResearchBtn"
+              class="deep-research-toggle deep-research-trigger"
+              aria-label="Toggle deep research before sending"
+              aria-pressed="false"
+            >
+              <span class="deep-research-flare" aria-hidden="true"></span>
+              Deep Research
+            </button>
+            <button
+              type="button"
+              id="attachBtn"
+              class="attachment-button"
+              aria-label="Attach local files"
+            >
+              Attach file
+            </button>
+          </div>
             <p id="attachmentNotice" class="attachment-notice" role="status" aria-live="polite"></p>
           </div>
 
@@ -95,11 +160,11 @@
               id="promptInput"
               placeholder="Type your question..."
               aria-label="Your prompt"
-              rows="2"
+              rows="1"
             ></textarea>
             <button type="submit" id="sendBtn">Send</button>
           </div>
-        </section>
+        </div>
       </form>
     </section>
   </div>
@@ -121,43 +186,39 @@
 
       <form id="settingsForm">
         <fieldset>
-          <legend>Context Retrieval</legend>
-          <label class="setting-toggle">
-            <input type="checkbox" id="autoWebSearchToggle" />
-            <span>
-              <strong>Automatic web search</strong>
-              <small>Enrich prompts with fresh snippets from DuckDuckGo.</small>
-            </span>
-          </label>
-
-          <label class="setting-range">
-            <div>
-              <strong>Max search results per prompt</strong>
-              <small>Number of snippets to collect (1-12): <span id="searchResultValue">10</span></small>
-            </div>
-            <input type="range" id="searchResultLimit" min="1" max="12" step="1" value="10" />
-          </label>
-        </fieldset>
-
-        <fieldset>
           <legend>Connection</legend>
           <label class="setting-text" for="ollamaEndpointInput">
             <span>
-              <strong>Ollama server endpoint</strong>
-              <small>Defaults to http://localhost:11434</small>
+              <strong>Model server endpoint</strong>
+              <small>Defaults to http://localhost:11434 for Ollama. Switch to your llama.cpp or ChatGPT-compatible host as needed.</small>
             </span>
             <input type="url" id="ollamaEndpointInput" inputmode="url" placeholder="http://localhost:11434" autocomplete="off" spellcheck="false" autocapitalize="none" />
           </label>
+          <label class="setting-toggle">
+            <input type="checkbox" id="chatCompatToggle" />
+            <span>
+              <strong>Enable llama.cpp / ChatGPT-compatible API endpoint mode</strong>
+              <small>Use this when your endpoint speaks the ChatGPT (OpenAI) API—e.g., llama.cpp, LM Studio, or other compatible servers.</small>
+            </span>
+          </label>
+          <div class="connection-actions">
+            <button type="button" id="refreshModels" aria-label="Refresh models list">Refresh models</button>
+            <p id="modelStatus" class="model-status" role="status" aria-live="polite">Models not loaded yet.</p>
+          </div>
         </fieldset>
 
         <fieldset>
           <legend>Appearance</legend>
-          <label class="setting-toggle">
-            <input type="checkbox" id="sidebarCollapseToggle" />
+          <label class="setting-text" for="themeSelect">
             <span>
-              <strong>Hide chat history sidebar</strong>
-              <small>Collapse the previous chats panel by default.</small>
+              <strong>Theme</strong>
+              <small>Follow system or force Light/Dark manually.</small>
             </span>
+            <select id="themeSelect">
+              <option value="system">Match system</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
           </label>
 
           <div class="settings-actions">
@@ -166,48 +227,27 @@
           </div>
         </fieldset>
 
+        <fieldset class="settings-support">
+          <legend>Support</legend>
+          <p>
+            Enjoying DioxideAi? <a href="https://buymeacoffee.com/dioxideai" target="_blank" rel="noopener noreferrer">Buy me a coffee</a> to keep updates coming.
+          </p>
+        </fieldset>
+
         <fieldset>
           <legend>Privacy</legend>
           <label class="setting-toggle">
             <input type="checkbox" id="shareAnalyticsToggle" checked />
             <span>
               <strong>Share anonymous usage analytics</strong>
-              <small>Help improve DioxideAi by sending basic, anonymized usage events.</small>
+              <small>
+                Help improve DioxideAi by sending basic metrics.
+                <a href="https://github.com/ianrelecker/dioxideai/blob/main/privacy.md" target="_blank" rel="noopener noreferrer">Here’s what’s collected.</a>
+              </small>
             </span>
           </label>
         </fieldset>
       </form>
-    </section>
-  </div>
-
-  <div id="supportOverlay" class="support-overlay hidden" aria-hidden="true">
-    <div class="support-backdrop"></div>
-    <section
-      id="supportPanel"
-      class="support-panel"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="supportTitle"
-      tabindex="-1"
-    >
-      <header class="support-header">
-        <h2 id="supportTitle">Support DioxideAi</h2>
-        <button id="supportCloseBtn" type="button" aria-label="Close support panel">✕</button>
-      </header>
-      <div class="support-card">
-        <strong>Enjoying DioxideAi?</strong>
-        <p>
-          This is a WinRAR-style project: totally free, but tips keep it going. If it saves you time,
-          you can scan or copy the BTC address below, or visit
-          <a href="https://relecker.com" target="_blank" rel="noopener noreferrer">relecker.com</a>.
-        </p>
-        <div class="support-details">
-          <div class="support-address">
-            <span>BTC</span>
-            <code>bc1qzs9m9ugzrzqsfdmhghlqvax0mdxqledn77v068</code>
-          </div>
-        </div>
-      </div>
     </section>
   </div>
 
@@ -247,15 +287,15 @@ ollama pull mistral:7b</code></pre>
         </section>
         <section>
           <h3>4. Pick the right size</h3>
-          <p>Match the model to your Mac's GPU/VRAM:</p>
+          <p>Match the model to your Mac's unified memory budget (as of November 2025—revisit often as open-source models evolve):</p>
           <ul>
-            <li><strong>16&nbsp;GB VRAM:</strong> <code>gemma:7b</code>, <code>llama3:8b</code></li>
-            <li><strong>24&nbsp;GB VRAM:</strong> <code>gemma3:12b</code></li>
-            <li><strong>32&nbsp;GB VRAM:</strong> <code>gpt-oss:20b</code></li>
-            <li><strong>48&nbsp;GB VRAM:</strong> <code>llama3:70b</code> (Q4)</li>
-            <li><strong>64&nbsp;GB VRAM and up:</strong> <code>gpt-oss:70b</code>, <code>mixtral:8x22b</code> (Q4/Q5)</li>
+            <li><strong>16&nbsp;GB unified memory:</strong> <code>llama3.1:8b</code>, <code>gemma:7b</code></li>
+            <li><strong>24&nbsp;GB unified memory:</strong> <code>gemma3:12b</code>, <code>llama3.1:8b</code>, <code>gpt-oss:20b</code> (stretch)</li>
+            <li><strong>32&nbsp;GB unified memory:</strong> <code>gpt-oss:20b</code>, <code>gemma3:12b</code>, <code>mixtral:8x7b</code></li>
+            <li><strong>48&nbsp;GB unified memory:</strong> <code>gpt-oss:20b</code>, <code>llama3.1:70b</code> (slower)</li>
+            <li><strong>64&nbsp;GB unified memory and up:</strong> <code>llama3.1:70b</code>, <code>llama3.3:70b</code>, <code>gpt-oss:20b</code>, <code>gpt-oss:120b</code> (experimental)</li>
           </ul>
-          <p>Check VRAM via <em>About This Mac → System Report → Graphics/Displays</em>.</p>
+          <p>Check unified memory via <em>About This Mac → System Report → Graphics/Displays</em>.</p>
         </section>
         <section>
           <h3>5. Connect in DioxideAi</h3>
@@ -263,6 +303,7 @@ ollama pull mistral:7b</code></pre>
             With Ollama running, pick your downloaded model in the header and start chatting. Fresh web context is
             fetched automatically when needed.
           </p>
+          <p><strong>Tip:</strong> Press <kbd>⌘</kbd>+<kbd>N</kbd> to start a new chat from anywhere.</p>
         </section>
       </div>
       <footer class="tutorial-footer">
@@ -272,7 +313,10 @@ ollama pull mistral:7b</code></pre>
         </label>
         <label class="tutorial-checkbox">
           <input type="checkbox" id="tutorialAnalyticsCheckbox" checked />
-          <span>Share anonymous usage analytics to help improve DioxideAi</span>
+          <span>
+            Share anonymous usage analytics to help improve DioxideAi.
+            <a href="https://github.com/ianrelecker/dioxideai/blob/main/privacy.md" target="_blank" rel="noopener noreferrer">Here’s what’s collected.</a>
+          </span>
         </label>
         <div class="tutorial-actions">
           <a class="secondary" href="https://ollama.ai" target="_blank" rel="noopener noreferrer">Visit Ollama</a>

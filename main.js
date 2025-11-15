@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { promises: fsPromises } = fs;
@@ -10,6 +10,7 @@ const dnsPromises = dns.promises;
 const cheerio = require('cheerio');
 const { marked } = require('marked');
 const { autoUpdater } = require('electron-updater');
+const os = require('os');
 
 const isDevelopment = !app.isPackaged;
 
@@ -29,11 +30,11 @@ const DEFAULT_SETTINGS = {
   openThoughtsByDefault: false,
   searchResultLimit: 10,
   theme: 'system',
-  sidebarCollapsed: false,
   showTutorial: true,
   shareAnalytics: true,
   ollamaEndpoint: 'http://localhost:11434',
   analyticsDeviceId: null,
+  useOpenAICompatibleEndpoint: false,
 };
 
 const STORE_FILE = 'dioxideai-chats.json';
@@ -61,6 +62,7 @@ let analyticsDeviceId = null;
 let analyticsDeviceIdPromise = null;
 let analyticsApiKey = null;
 let analyticsApiKeyLoaded = false;
+let cachedAppInfoPayload = null;
 
 function normalizeOllamaEndpoint(value) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -77,6 +79,190 @@ function buildOllamaUrl(pathname) {
   const base = resolveOllamaEndpoint();
   const cleanPath = pathname && pathname.startsWith('/') ? pathname : `/${pathname || ''}`;
   return `${base}${cleanPath}`;
+}
+
+async function chatCompletion(model, messages, options = {}, effectiveSettingsOverride = null) {
+  if (!model || !String(model).trim()) {
+    throw new Error('Model is required for chat completion.');
+  }
+  if (!Array.isArray(messages) || !messages.length) {
+    throw new Error('Messages are required for chat completion.');
+  }
+
+  const timeoutMs = Number.isFinite(options?.timeoutMs) ? Math.max(4000, Number(options.timeoutMs)) : 20000;
+  const effectiveSettings = effectiveSettingsOverride || getEffectiveSettings();
+  const baseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
+  const usingChatCompat = Boolean(effectiveSettings.useOpenAICompatibleEndpoint);
+  const endpointPath = usingChatCompat ? '/v1/chat/completions' : '/api/chat';
+  const body = {
+    model,
+    messages,
+    stream: false,
+  };
+  if (options?.temperature !== undefined) {
+    if (usingChatCompat) {
+      body.temperature = options.temperature;
+    } else {
+      body.options = { ...(body.options || {}), temperature: options.temperature };
+    }
+  }
+
+  const response = await fetchWithTimeout(
+    `${baseUrl}${endpointPath}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    },
+    timeoutMs
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => '');
+    const sourceLabel = usingChatCompat ? 'ChatGPT-compatible chat' : 'Ollama chat';
+    throw new Error(`${sourceLabel} failed (HTTP ${response.status})${errorText ? ` – ${errorText.slice(0, 200)}` : ''}`);
+  }
+
+  const data = await response.json();
+  const firstChoice = Array.isArray(data?.choices) ? data.choices[0] : null;
+  let content = '';
+  if (typeof data?.message?.content === 'string') {
+    content = data.message.content;
+  } else if (typeof data?.response === 'string') {
+    content = data.response;
+  } else if (usingChatCompat) {
+    if (typeof firstChoice?.message?.content === 'string') {
+      content = firstChoice.message.content;
+    } else if (typeof firstChoice?.delta?.content === 'string') {
+      content = firstChoice.delta.content;
+    }
+  }
+
+  return {
+    content: typeof content === 'string' ? content.trim() : '',
+    raw: data,
+  };
+}
+
+function formatFindingsForPrompt(findings = []) {
+  if (!Array.isArray(findings) || !findings.length) {
+    return '';
+  }
+  return findings
+    .map((entry, index) => {
+      const title = entry?.title || entry?.url || `Finding ${index + 1}`;
+      const detail = entry?.summary || entry?.snippet || '';
+      const host = entry?.url ? resolveHostname(entry.url) : '';
+      const parts = [`${index + 1}. ${title}`];
+      if (detail) {
+        parts.push(detail);
+      }
+      if (host) {
+        parts.push(`(${host})`);
+      } else if (entry?.url) {
+        parts.push(`(${entry.url})`);
+      }
+      return parts.join(' ');
+    })
+    .join('\n');
+}
+
+function extractJsonObjectFromText(text) {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+  const trimmed = text.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch (err) {
+    // continue
+  }
+
+  const match = trimmed.match(/\{[\s\S]*\}/);
+  if (!match) {
+    return null;
+  }
+  try {
+    return JSON.parse(match[0]);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function synthesizeDeepResearchDraft({
+  model,
+  topic,
+  findings,
+  priorDraft = '',
+  reflection = '',
+}) {
+  if (!model || !Array.isArray(findings) || !findings.length) {
+    return '';
+  }
+  const findingsText = formatFindingsForPrompt(findings);
+  const lines = [
+    `Question: ${topic}`,
+    '',
+    'Findings gathered from the web:',
+    findingsText,
+  ];
+  if (reflection) {
+    lines.push('', 'Key takeaways so far:', reflection);
+  }
+  if (priorDraft) {
+    lines.push('', 'Earlier draft answer:', priorDraft);
+  }
+  lines.push(
+    '',
+    'Craft a precise answer that only relies on these findings. Cite concrete facts, note disagreements when present, and explain implications in 2-3 short paragraphs. Do not mention this instruction.'
+  );
+
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'You are a meticulous researcher that drafts concise, evidence-backed answers from supplied findings. Never fabricate information.',
+    },
+    { role: 'user', content: lines.join('\n') },
+  ];
+
+  const result = await chatCompletion(model, messages, { timeoutMs: 25000 });
+  return result.content || '';
+}
+
+async function evaluateDeepResearchDraft({ model, topic, draft }) {
+  if (!model || !draft) {
+    return null;
+  }
+
+  const instructions = [
+    'You are a critical reviewer that decides whether a draft fully answers the question.',
+    'Respond ONLY with JSON: {"verdict":"good"|"revise","critique":"<brief reason>"}',
+    'Mark "good" only if the draft directly answers the question, cites concrete facts from the findings, and addresses likely follow-ups.',
+  ].join(' ');
+
+  const messages = [
+    { role: 'system', content: instructions },
+    {
+      role: 'user',
+      content: `Question: ${topic}\n\nDraft answer:\n${draft}\n\nIs this answer complete and well-supported?`,
+    },
+  ];
+
+  const result = await chatCompletion(model, messages, { timeoutMs: 20000 });
+  const parsed = extractJsonObjectFromText(result.content);
+  if (!parsed) {
+    return null;
+  }
+  const verdictRaw = typeof parsed.verdict === 'string' ? parsed.verdict.trim().toLowerCase() : '';
+  const critique = typeof parsed.critique === 'string' ? parsed.critique.trim() : '';
+  const accepted = verdictRaw === 'good' || verdictRaw === 'approve' || verdictRaw === 'yes';
+
+  return {
+    verdict: verdictRaw || (accepted ? 'good' : 'revise'),
+    critique,
+    accepted,
+  };
 }
 
 function getAnalyticsApiKey() {
@@ -387,7 +573,7 @@ const TOKEN_STOP_WORDS = new Set([
 
 const REFERENTIAL_FOLLOW_UP_STOP_WORDS = TOKEN_STOP_WORDS;
 
-const MAX_ATTACHMENTS_PER_PROMPT = 4;
+const MAX_ATTACHMENTS_PER_PROMPT = 1;
 const MAX_ATTACHMENT_BYTES = 512 * 1024; // 512 KB per file
 const MAX_ATTACHMENT_TOTAL_BYTES = 1024 * 1024; // 1 MB per request
 const MAX_ATTACHMENT_CHARS = 4000;
@@ -403,6 +589,53 @@ const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
   '.yml',
 ]);
 
+const MIN_DEEP_RESEARCH_ITERATIONS = 3;
+const MAX_DEEP_RESEARCH_ITERATIONS = 5;
+const DEFAULT_DEEP_RESEARCH_ITERATIONS = 4;
+const DEEP_RESEARCH_FINDINGS_PER_PASS = 3;
+const DEEP_RESEARCH_MAX_QUERY_POOL = 8;
+const DEEP_RESEARCH_MAX_SUMMARY_CHARS = 2000;
+const DUCKDUCKGO_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15';
+const DUCKDUCKGO_HTML_ACCEPT =
+  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+const DUCKDUCKGO_JSON_ACCEPT = 'application/json, text/plain;q=0.9, */*;q=0.8';
+const DUCKDUCKGO_SEARCH_VARIANTS = [
+  {
+    name: 'html-get',
+    type: 'html',
+    method: 'GET',
+    buildUrl: (query) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&ia=web`,
+  },
+  {
+    name: 'html-post',
+    type: 'html',
+    method: 'POST',
+    buildUrl: () => 'https://html.duckduckgo.com/html/',
+    buildBody: (query) => new URLSearchParams({ q: query, ia: 'web' }).toString(),
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  },
+  {
+    name: 'main-html',
+    type: 'html',
+    method: 'GET',
+    buildUrl: (query) => `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}&ia=web`,
+  },
+  {
+    name: 'lite',
+    type: 'html',
+    method: 'GET',
+    buildUrl: (query) => `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}&ia=web`,
+  },
+  {
+    name: 'instant-answer',
+    type: 'json',
+    method: 'GET',
+    buildUrl: (query) =>
+      `https://duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_redirect=1&no_html=1&skip_disambig=1`,
+  },
+];
+
 app.whenReady().then(async () => {
   await Promise.all([ensureSettingsLoaded(), ensureChatsLoaded()]);
   createWindow();
@@ -412,7 +645,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 960,
     height: 780,
-    minWidth: 860,
+    minWidth: 760,
     minHeight: 640,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -468,9 +701,82 @@ ipcMain.handle('check-for-updates', async () => {
   }
 });
 
+async function resolveAppInfoPayload() {
+  if (cachedAppInfoPayload) {
+    return cachedAppInfoPayload;
+  }
+  const osVersion =
+    typeof process.getSystemVersion === 'function'
+      ? process.getSystemVersion()
+      : `${os.type()} ${os.release()}`;
+  const proxyConfigured = Boolean(
+    process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy
+  );
+  const payload = {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+    node: process.versions.node,
+    chrome: process.versions.chrome,
+    environment: isDevelopment ? 'development' : 'production',
+    osVersion,
+    locale: app.getLocale?.() || null,
+    proxyConfigured,
+    gpuAdapter: null,
+  };
+  if (typeof app.getGPUInfo === 'function') {
+    try {
+      const gpuInfo = await app.getGPUInfo('basic');
+      const devices = Array.isArray(gpuInfo?.gpuDevice) ? gpuInfo.gpuDevice : [];
+      if (devices.length) {
+        const primary = devices.find((device) => device?.active) || devices[0];
+        payload.gpuAdapter =
+          primary?.deviceString ||
+          primary?.name ||
+          primary?.model ||
+          primary?.vendor ||
+          null;
+      }
+    } catch (err) {
+      console.error('Failed to retrieve GPU info:', err);
+    }
+  }
+  cachedAppInfoPayload = payload;
+  return payload;
+}
+
 ipcMain.handle('get-settings', async () => {
   await ensureSettingsLoaded();
   return getRendererSafeSettings();
+});
+
+ipcMain.handle('get-app-info', async () => {
+  if (!app.isReady()) {
+    await app.whenReady();
+  }
+  const info = await resolveAppInfoPayload();
+  return { ...info };
+});
+
+ipcMain.handle('open-external', async (_event, rawUrl = '') => {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    return { error: 'Invalid URL' };
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { error: 'Blocked protocol' };
+    }
+    await shell.openExternal(parsed.toString());
+    return { opened: true };
+  } catch (err) {
+    console.error('Failed to open external link:', err);
+    return { error: err.message || 'Failed to open link' };
+  }
 });
 
 ipcMain.handle('update-settings', async (_event, partialSettings) => {
@@ -485,15 +791,35 @@ ipcMain.handle('update-settings', async (_event, partialSettings) => {
 ipcMain.handle('fetch-models', async () => {
   try {
     await ensureSettingsLoaded();
-    const res = await fetch(buildOllamaUrl('/api/tags'));
+    const effective = getEffectiveSettings();
+    const baseUrl = normalizeOllamaEndpoint(effective.ollamaEndpoint);
+    const usingChatCompat = Boolean(effective.useOpenAICompatibleEndpoint);
+    const endpointPath = usingChatCompat ? '/v1/models' : '/api/tags';
+    const res = await fetch(`${baseUrl}${endpointPath}`);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
 
     const data = await res.json();
-    const models = Array.isArray(data?.models) ? data.models : [];
+    if (usingChatCompat) {
+      const entries = Array.isArray(data?.data) ? data.data : [];
+      return entries
+        .map((entry) => (typeof entry?.id === 'string' ? entry.id.trim() : typeof entry?.name === 'string' ? entry.name.trim() : typeof entry?.model === 'string' ? entry.model.trim() : ''))
+        .filter((name) => Boolean(name));
+    }
 
-    return models.map((model) => model.name);
+    const models = Array.isArray(data?.models) ? data.models : [];
+    return models
+      .map((model) => {
+        if (typeof model?.name === 'string') {
+          return model.name.trim();
+        }
+        if (typeof model?.model === 'string') {
+          return model.model.trim();
+        }
+        return '';
+      })
+      .filter((name) => Boolean(name));
   } catch (err) {
     console.error('Error fetching models:', err);
     return [];
@@ -653,6 +979,10 @@ ipcMain.handle('pick-local-files', async (_event, rawOptions = {}) => {
   const existingCount = Number.isFinite(options.existingCount) ? Number(options.existingCount) : 0;
   const existingBytes = Number.isFinite(options.existingBytes) ? Number(options.existingBytes) : 0;
   const remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_PROMPT - existingCount);
+  const attachmentLimitMessage =
+    MAX_ATTACHMENTS_PER_PROMPT === 1
+      ? 'Only one file is allowed per prompt. Remove the current attachment before adding another.'
+      : `Only ${MAX_ATTACHMENTS_PER_PROMPT} files are allowed per prompt. Remove an attachment before adding more.`;
   const droppedPaths = Array.isArray(options.droppedPaths)
     ? Array.from(
         new Set(
@@ -679,7 +1009,7 @@ ipcMain.handle('pick-local-files', async (_event, rawOptions = {}) => {
       files: [],
       rejected: [
         {
-          reason: `Only ${MAX_ATTACHMENTS_PER_PROMPT} files are allowed per prompt. Remove an attachment before adding more.`,
+          reason: attachmentLimitMessage,
         },
       ],
       limits,
@@ -708,7 +1038,7 @@ ipcMain.handle('pick-local-files', async (_event, rawOptions = {}) => {
       droppedPaths.slice(remainingSlots).forEach((filePath) => {
         rejected.push({
           name: path.basename(filePath),
-          reason: `Only ${MAX_ATTACHMENTS_PER_PROMPT} files are allowed per prompt. Remove an attachment before adding more.`,
+          reason: attachmentLimitMessage,
         });
       });
     }
@@ -817,7 +1147,337 @@ ipcMain.handle('pick-local-files', async (_event, rawOptions = {}) => {
   return { files: accepted, rejected, limits };
 });
 
-ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, userLinks = [], attachments = [] }) => {
+ipcMain.handle('deep-research', async (event, rawOptions = {}) => {
+  await ensureSettingsLoaded();
+  await ensureChatsLoaded();
+  const options = typeof rawOptions === 'object' && rawOptions !== null ? rawOptions : {};
+  const rawTopic = typeof options.topic === 'string' ? options.topic.trim() : '';
+  let topic = rawTopic;
+
+  if (!topic) {
+    return { error: 'A topic or question is required for deep research.' };
+  }
+
+  const chatId = options.chatId || null;
+  const iterations = clampDeepResearchIterations(options.iterations);
+  const requestId = options.requestId || randomUUID();
+  const resultLimit = clampSearchLimit(
+    options.resultLimit !== undefined ? Number(options.resultLimit) : DEFAULT_SETTINGS.searchResultLimit
+  );
+  let primaryGoal =
+    typeof options.initialGoal === 'string' && options.initialGoal.trim() ? options.initialGoal.trim() : '';
+  if (chatId) {
+    const ownedChat = chatsCache.find((item) => item.id === chatId);
+    const resolvedGoal = resolveChatInitialGoal(ownedChat);
+    if (resolvedGoal) {
+      primaryGoal = resolvedGoal;
+    }
+  }
+  const combinedGoal = buildPrimaryAlignedTopic(primaryGoal, rawTopic);
+  if (combinedGoal) {
+    topic = combinedGoal;
+  }
+
+  const seedSource = Array.isArray(options.initialQueries)
+    ? options.initialQueries
+    : Array.isArray(options.additionalQueries)
+    ? options.additionalQueries
+    : [];
+  const seedQueries = buildInitialResearchQueries(topic, seedSource);
+  if (!seedQueries.length) {
+    seedQueries.push(topic);
+  }
+  const usedQueryHashes = new Set(seedQueries.map((value) => value.toLowerCase()));
+  const modelForResearch =
+    typeof options.model === 'string' && options.model.trim() ? options.model.trim() : '';
+  const enqueueQuery = (candidate) => {
+    if (!candidate || seedQueries.length >= DEEP_RESEARCH_MAX_QUERY_POOL) {
+      return false;
+    }
+    const trimmedCandidate = String(candidate).trim();
+    if (!trimmedCandidate) {
+      return false;
+    }
+    const normalized = trimmedCandidate.toLowerCase();
+    if (usedQueryHashes.has(normalized)) {
+      return false;
+    }
+    seedQueries.push(trimmedCandidate);
+    usedQueryHashes.add(normalized);
+    return true;
+  };
+
+  const sendProgress = (payload) => {
+    if (!event?.sender || !payload) {
+      return;
+    }
+    try {
+      event.sender.send('deep-research-progress', {
+        requestId,
+        chatId,
+        topic,
+        primaryGoal,
+        ...payload,
+      });
+    } catch (err) {
+      console.error('Failed to send deep research progress:', err);
+    }
+  };
+
+  try {
+    const online = await hasNetworkConnectivity();
+    if (!online) {
+      const offlineError = 'No network connection detected. Unable to run deep research.';
+      sendProgress({ stage: 'error', message: offlineError });
+      return { error: offlineError };
+    }
+
+    sendProgress({
+      stage: 'planning',
+      totalIterations: iterations,
+      nextQueries: seedQueries.slice(0, 3),
+      message: `Preparing ${iterations} passes of deep research.`,
+    });
+
+    const timeline = [];
+    const seenUrls = new Set();
+    const researchMemory = [];
+    let queryCursor = 0;
+    let satisfied = false;
+    let finalDraftAnswer = '';
+
+    for (let iteration = 1; iteration <= iterations; iteration += 1) {
+      const query =
+        seedQueries[queryCursor] || seedQueries[seedQueries.length - 1] || topic;
+      const iterationLabel = { iteration, totalIterations: iterations, query };
+
+      sendProgress({
+        stage: 'iteration-start',
+        message: `Pass ${iteration} – searching for fresh coverage…`,
+        ...iterationLabel,
+      });
+
+      let searchResult = { entries: [] };
+      try {
+        searchResult = await performWebSearch([query], {
+          limit: resultLimit,
+          timeoutMs: 7000,
+          pageTimeoutMs: 5000,
+        });
+      } catch (err) {
+        console.error('Deep research search failed:', err);
+        const errorMessage = err?.message || 'Search failed.';
+        timeline.push({
+          iteration,
+          query,
+          findings: [],
+          message: errorMessage,
+          review: '',
+          error: errorMessage,
+        });
+        sendProgress({
+          stage: 'iteration-error',
+          message: errorMessage,
+          ...iterationLabel,
+        });
+        queryCursor += 1;
+        continue;
+      }
+
+      const normalizedEntries = Array.isArray(searchResult.entries) ? searchResult.entries : [];
+      const freshEntries = filterFreshEntries(
+        normalizedEntries,
+        seenUrls,
+        DEEP_RESEARCH_FINDINGS_PER_PASS
+      );
+      const findings = summarizeDeepResearchEntries(freshEntries);
+      const iterationMessage = findings.length
+        ? `Pass ${iteration} captured ${findings.length} new source${findings.length === 1 ? '' : 's'}.`
+        : `Pass ${iteration} produced no novel sources – refining follow-up queries.`;
+
+      timeline.push({
+        iteration,
+        query,
+        findings,
+        message: iterationMessage,
+        review: '',
+      });
+      const timelineEntry = timeline[timeline.length - 1];
+
+      sendProgress({
+        stage: 'iteration-review',
+        findings,
+        message: iterationMessage,
+        ...iterationLabel,
+      });
+
+      const followUps = deriveFollowUpQueries(freshEntries, topic, seedQueries);
+      if (followUps.length) {
+        followUps.forEach((nextQuery) => enqueueQuery(nextQuery));
+      }
+
+      const iterationMemory = freshEntries.map((entry) => ({
+        title: entry.title || '',
+        summary: entry.summary || entry.snippet || '',
+        snippet: entry.snippet || entry.summary || '',
+        url: entry.url || '',
+      }));
+      if (iterationMemory.length) {
+        researchMemory.push(...iterationMemory);
+      }
+
+      const reflection = buildResearchReflection(topic, researchMemory, seedQueries);
+      if (reflection.nextQueries?.length) {
+        reflection.nextQueries.forEach((nextQuery) => enqueueQuery(nextQuery));
+      }
+      if (modelForResearch && timeline.length) {
+        try {
+          const modelQueries = await generateQuerySuggestions({
+            model: modelForResearch,
+            topic,
+            timeline,
+            existingQueries: seedQueries,
+            maxSuggestions: 2,
+          });
+          if (Array.isArray(modelQueries) && modelQueries.length) {
+            modelQueries.forEach((candidate) => enqueueQuery(candidate));
+            sendProgress({
+              stage: 'iteration-reflection',
+              message: `Model suggested new queries: ${modelQueries.join(', ')}`,
+              suggestions: modelQueries,
+              ...iterationLabel,
+            });
+          }
+        } catch (suggestErr) {
+          console.error('Model query suggestion failed:', suggestErr);
+        }
+      }
+      if (reflection.summary) {
+        if (timelineEntry) {
+          timelineEntry.review = reflection.summary;
+        }
+        sendProgress({
+          stage: 'iteration-reflection',
+          message: reflection.summary,
+          review: reflection.summary,
+          suggestions: reflection.nextQueries,
+          ...iterationLabel,
+        });
+      }
+
+      if (modelForResearch && findings.length) {
+        sendProgress({
+          stage: 'model-draft',
+          message: `Drafting answer from pass ${iteration} findings…`,
+          ...iterationLabel,
+        });
+
+        try {
+          const draft = await synthesizeDeepResearchDraft({
+            model: modelForResearch,
+            topic,
+            findings: freshEntries,
+            priorDraft: finalDraftAnswer,
+            reflection: timelineEntry?.review || '',
+          });
+
+          if (draft) {
+            timelineEntry.answer = draft;
+            finalDraftAnswer = draft;
+            sendProgress({
+              stage: 'model-draft',
+              message: `Draft ready from pass ${iteration}.`,
+              answer: draft,
+              ...iterationLabel,
+            });
+
+            sendProgress({
+              stage: 'model-eval',
+              message: `Reviewing draft from pass ${iteration}…`,
+              answer: draft,
+              ...iterationLabel,
+            });
+
+            const evaluation = await evaluateDeepResearchDraft({
+              model: modelForResearch,
+              topic,
+              draft,
+            });
+
+            if (evaluation) {
+              timelineEntry.verdict = evaluation.verdict;
+              timelineEntry.reviewNotes = evaluation.critique || '';
+
+              sendProgress({
+                stage: 'model-eval',
+                message:
+                  evaluation.critique || (evaluation.accepted ? 'Draft approved.' : 'Needs refinement.'),
+                verdict: evaluation.verdict,
+                answer: draft,
+                reviewNotes: evaluation.critique,
+                ...iterationLabel,
+              });
+
+              if (evaluation.accepted) {
+                satisfied = true;
+                break;
+              }
+            }
+          }
+        } catch (draftErr) {
+          console.error('Deep research drafting failed:', draftErr);
+          sendProgress({
+            stage: 'model-error',
+            message: draftErr?.message || 'Unable to synthesize an answer from the findings.',
+            ...iterationLabel,
+          });
+        }
+      }
+
+      queryCursor += 1;
+      if (satisfied) {
+        break;
+      }
+    }
+
+    if (!finalDraftAnswer && timeline.length) {
+      const lastWithAnswer = [...timeline].reverse().find((entry) => entry?.answer);
+      if (lastWithAnswer?.answer) {
+        finalDraftAnswer = lastWithAnswer.answer;
+      }
+    }
+
+    const summaryPayload = buildDeepResearchSummary(topic, timeline, finalDraftAnswer);
+
+    sendProgress({
+      stage: 'complete',
+      summary: summaryPayload.summary,
+      sources: summaryPayload.sources,
+      iterations: timeline.length,
+      answer: summaryPayload.answer,
+    });
+
+    return {
+      requestId,
+      topic,
+      iterations: timeline.length,
+      summary: summaryPayload.summary,
+      sources: summaryPayload.sources,
+      answer: summaryPayload.answer,
+      timeline,
+    };
+  } catch (err) {
+    console.error('Deep research failed:', err);
+    const message = err?.message || 'Deep research failed.';
+    sendProgress({ stage: 'error', message });
+    return { error: message };
+  }
+});
+
+ipcMain.handle('ask-ollama', async (
+  event,
+  { chatId, model, prompt, requestId, userLinks = [], attachments = [], deepResearch = null }
+) => {
   if (!prompt?.trim()) {
     return { chatId, error: 'Prompt is empty' };
   }
@@ -860,10 +1520,12 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
   const searchPrompt = buildSearchPrompt(chat, prompt);
   const focusTerms = deriveFollowUpFocus(chat, prompt);
   const baseHasRecentContext = hasRecentWebContext(chat);
-  const ollamaBaseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
-  const buildOllamaApiUrl = (suffix) => {
+  const modelBaseUrl = normalizeOllamaEndpoint(effectiveSettings.ollamaEndpoint);
+  const usingChatCompletionsApi = Boolean(effectiveSettings.useOpenAICompatibleEndpoint);
+  const chatEndpointPath = usingChatCompletionsApi ? '/v1/chat/completions' : '/api/chat';
+  const buildModelApiUrl = (suffix) => {
     const cleanPath = suffix && suffix.startsWith('/') ? suffix : `/${suffix || ''}`;
-    return `${ollamaBaseUrl}${cleanPath}`;
+    return `${modelBaseUrl}${cleanPath}`;
   };
   const searchPlan = createSearchPlan(searchPrompt, effectiveSettings, prompt, {
     hasRecentContext: baseHasRecentContext,
@@ -879,23 +1541,29 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     goalAligned,
   });
 
-  if (!searchPlan.disabled) {
-    if (!Array.isArray(searchPlan.queries) || !searchPlan.queries.length) {
-      const fallbackQuery = searchPrompt || prompt;
-      if (fallbackQuery && fallbackQuery.trim()) {
-        searchPlan.queries = [fallbackQuery.trim()];
-      }
+  if (!Array.isArray(searchPlan.queries) || !searchPlan.queries.length) {
+    const fallbackQuery = searchPrompt || prompt;
+    if (fallbackQuery && fallbackQuery.trim()) {
+      searchPlan.queries = [fallbackQuery.trim()];
     }
-    searchPlan.shouldSearch = true;
-    if (!searchPlan.message) {
-      searchPlan.message = 'Gathering fresh web context for this request.';
-    }
+  }
+  searchPlan.disabled = false;
+  searchPlan.shouldSearch = true;
+  if (!searchPlan.message) {
+    searchPlan.message = 'Gathering fresh web context for this request.';
   }
 
   const conversationFirst =
     !searchPlan.shouldSearch && !searchPlan.disabled && conversationAnalysis.confidence >= 0.65;
 
-  let contextResult = { text: '', entries: [], queries: [], retrievedAt: null, userLinks: [] };
+  let contextResult = {
+    text: '',
+    entries: [],
+    queries: [],
+    retrievedAt: null,
+    userLinks: [],
+    deepResearch: null,
+  };
   let contextMessage = '';
   let contextQueries = [];
   let userLinksForContext = [...normalizedUserLinks];
@@ -908,8 +1576,16 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
   let totalChars = 0;
   let totalTokens = 0;
 
-  let allowSearch = !searchPlan.disabled && searchPlan.queries.length > 0 && goalAligned;
+  let allowSearch = !searchPlan.disabled && searchPlan.queries.length > 0;
   let skippedForOffline = false;
+
+  const normalizedDeepResearch = normalizeDeepResearchMeta(deepResearch);
+  const deepResearchBlock = buildDeepResearchContextBlock(normalizedDeepResearch);
+  const usedDeepResearch = Boolean(deepResearchBlock);
+  if (usedDeepResearch) {
+    allowSearch = false;
+    contextResult.deepResearch = normalizedDeepResearch;
+  }
 
   if (allowSearch) {
     const online = await hasNetworkConnectivity();
@@ -950,7 +1626,9 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     }
     contextQueries = contextResult.queries;
   } else {
-    if (!goalAligned) {
+    if (usedDeepResearch) {
+      contextMessage = 'Using deep research findings gathered earlier.';
+    } else if (!goalAligned) {
       contextMessage =
         'Staying focused on the original objective from the first user request. Invite the user to start a new chat for unrelated tasks.';
     } else if (skippedForOffline) {
@@ -984,6 +1662,10 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
       );
     }
     contextSections.push(goalLines.join('\n'));
+  }
+
+  if (usedDeepResearch && deepResearchBlock) {
+    contextSections.push(deepResearchBlock);
   }
 
   let preparedContextText = '';
@@ -1035,6 +1717,12 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     }
   }
 
+  if (usedDeepResearch) {
+    contextMessage = contextMessage
+      ? `${contextMessage} Deep research findings gathered before responding have been included.`
+      : 'Using deep research findings gathered before responding.';
+  }
+
   if (uploadedFiles.length) {
     const lowercaseMessage = contextMessage.toLowerCase();
     if (lowercaseMessage.includes('no network')) {
@@ -1061,6 +1749,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     retrievedAt: contextResult.retrievedAt,
     attachments: contextResult.attachments,
     attachmentWarnings: attachmentsResult.warnings,
+    deepResearch: contextResult.deepResearch,
     goalAligned,
     primaryGoal: initialGoal || undefined,
     limitedWebContext: shouldLimitWebContext,
@@ -1202,8 +1891,9 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     let checkingDirective = true;
     let searchDirectiveQuery = null;
     let abortedForDirective = false;
+    let streamCompleted = false;
 
-    const response = await fetch(buildOllamaApiUrl('/api/chat'), {
+    const response = await fetch(buildModelApiUrl(chatEndpointPath), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1215,7 +1905,8 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     });
 
     if (!response.ok) {
-      throw new Error(`Ollama API error: HTTP ${response.status}`);
+      const sourceLabel = usingChatCompletionsApi ? 'ChatGPT-compatible API' : 'Ollama API';
+      throw new Error(`${sourceLabel} error: HTTP ${response.status}`);
     }
 
     let buffer = '';
@@ -1255,9 +1946,22 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     const processParsed = (parsed) => {
       const reasoningPayload = parsed?.message?.reasoning ?? parsed?.reasoning ?? null;
       const reasoningDelta = registerReasoningDelta(reasoningPayload);
+      const primaryChoice = Array.isArray(parsed?.choices) ? parsed.choices[0] : null;
 
-      if (parsed?.message?.content) {
-        let chunkText = parsed.message.content;
+      let chunkText = '';
+      if (typeof parsed?.message?.content === 'string') {
+        chunkText = parsed.message.content;
+      } else if (typeof parsed?.response === 'string') {
+        chunkText = parsed.response;
+      } else if (usingChatCompletionsApi) {
+        if (typeof primaryChoice?.delta?.content === 'string') {
+          chunkText = primaryChoice.delta.content;
+        } else if (typeof primaryChoice?.message?.content === 'string') {
+          chunkText = primaryChoice.message.content;
+        }
+      }
+
+      if (chunkText) {
         if (checkingDirective) {
           directiveBuffer += chunkText;
           const trimmed = directiveBuffer.trim();
@@ -1322,19 +2026,39 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
         emitUpdate({ delta: '', done: false, force: true });
       }
 
-    if (parsed?.done) {
-      flushDirectiveBuffer();
-      tStreamEnd = Date.now();
-      emitUpdate({ delta: '', done: true, force: true });
-    }
-  };
+      const finishReasonDetected =
+        Boolean(parsed?.done) ||
+        (Array.isArray(parsed?.choices) && parsed.choices.some((choice) => Boolean(choice?.finish_reason)));
+
+      if (!streamCompleted && finishReasonDetected) {
+        streamCompleted = true;
+        flushDirectiveBuffer();
+        tStreamEnd = Date.now();
+        emitUpdate({ delta: '', done: true, force: true });
+      }
+    };
 
     const processLine = (line) => {
-      if (!line.trim()) {
+      const trimmed = line.trim();
+      if (!trimmed) {
         return;
       }
+      let payload = trimmed;
+      if (usingChatCompletionsApi) {
+        if (payload.startsWith('data:')) {
+          const dataPayload = payload.slice(5).trim();
+          if (!dataPayload || dataPayload === '[DONE]') {
+            processParsed({ done: true });
+            return;
+          }
+          payload = dataPayload;
+        } else if (payload === '[DONE]') {
+          processParsed({ done: true });
+          return;
+        }
+      }
       try {
-        const parsed = JSON.parse(line);
+        const parsed = JSON.parse(payload);
         processParsed(parsed);
       } catch (err) {
         console.error('Failed to parse stream chunk:', err);
@@ -1501,7 +2225,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
       return { chatId, aborted: true };
     }
 
-    console.error('Error querying Ollama:', err);
+    console.error('Error querying model endpoint:', err);
     event.sender.send('ollama-stream', {
       chatId,
       error: err.message || 'Unknown error',
@@ -1618,6 +2342,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
         reasoning: finalReasoning,
         supportsReasoning: reasoningDetected,
         attachments: contextResult.attachments,
+        deepResearch: contextResult.deepResearch,
         timing: timingInfo,
       },
     }
@@ -1645,6 +2370,7 @@ ipcMain.handle('ask-ollama', async (event, { chatId, model, prompt, requestId, u
     limitedWebContext: shouldLimitWebContext,
     attachments: contextResult.attachments,
     attachmentWarnings: attachmentsResult.warnings,
+    deepResearch: contextResult.deepResearch,
     timing: timingInfo,
     reasoning: finalReasoning,
     usedWebSearch,
@@ -2022,16 +2748,16 @@ function applySettingsPatch(base, partial) {
     next.theme = normalizeTheme(partial.theme);
   }
 
-  if (partial.sidebarCollapsed !== undefined) {
-    next.sidebarCollapsed = Boolean(partial.sidebarCollapsed);
-  }
-
   if (partial.showTutorial !== undefined) {
     next.showTutorial = Boolean(partial.showTutorial);
   }
 
   if (partial.shareAnalytics !== undefined) {
     next.shareAnalytics = Boolean(partial.shareAnalytics);
+  }
+
+  if (partial.useOpenAICompatibleEndpoint !== undefined) {
+    next.useOpenAICompatibleEndpoint = Boolean(partial.useOpenAICompatibleEndpoint);
   }
 
   if (partial.analyticsDeviceId !== undefined) {
@@ -2120,52 +2846,38 @@ async function performWebSearch(queries, options = {}) {
   try {
     /* eslint-disable no-await-in-loop */
     for (const query of uniqueQueries) {
-      const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}&ia=web`;
-      const res = await fetchWithTimeout(url, {
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15',
-        },
-      }, searchTimeout);
-
-      if (!res.ok) {
-        throw new Error(`DuckDuckGo HTTP ${res.status}`);
+      let results = [];
+      try {
+        results = await fetchDuckDuckGoResults(query, searchTimeout);
+      } catch (err) {
+        console.error(`DuckDuckGo search failed for "${query}":`, err?.message || err);
+        continue;
       }
 
-      const html = await res.text();
-      const $ = cheerio.load(html);
+      if (!Array.isArray(results) || !results.length) {
+        continue;
+      }
 
-      $('.result').each((index, element) => {
+      for (const result of results) {
         if (entries.length >= maxEntries) {
-          return false;
+          break;
         }
-
-        const title =
-          $(element).find('.result__a').text().trim() ||
-          $(element).find('.result__title').text().trim();
-        const snippet = $(element).find('.result__snippet').text().trim();
-        const rawHref = $(element).find('.result__a').attr('href');
-        const urlValue = decodeDuckDuckGoUrl(rawHref);
-
-        if (!title && !snippet) {
-          return;
+        const normalizedUrl = typeof result.url === 'string' ? result.url.trim() : '';
+        if (normalizedUrl && seenUrls.has(normalizedUrl)) {
+          continue;
         }
-
-        if (urlValue && seenUrls.has(urlValue)) {
-          return;
+        if (normalizedUrl) {
+          seenUrls.add(normalizedUrl);
         }
-
-        if (urlValue) {
-          seenUrls.add(urlValue);
-        }
-
+        const snippet = result.snippet ? truncateSnippet(result.snippet) : '';
         entries.push({
-          title: title || urlValue || 'Result',
-          snippet: snippet ? truncateSnippet(snippet) : '',
-          url: urlValue,
+          title: result.title || normalizedUrl || 'Result',
+          snippet,
+          summary: result.summary || result.snippet || '',
+          url: normalizedUrl,
           queryUsed: query,
         });
-      });
+      }
 
       if (entries.length >= maxEntries) {
         break;
@@ -2193,6 +2905,199 @@ async function performWebSearch(queries, options = {}) {
     console.error('Web search failed:', err);
     return { text: '', entries: [], queries: uniqueQueries, retrievedAt };
   }
+}
+
+async function fetchDuckDuckGoResults(query, timeoutMs) {
+  const trimmedQuery = typeof query === 'string' ? query.trim() : '';
+  if (!trimmedQuery) {
+    return [];
+  }
+
+  const attemptErrors = [];
+
+  for (const variant of DUCKDUCKGO_SEARCH_VARIANTS) {
+    const url = variant.buildUrl(trimmedQuery);
+    if (!url) {
+      continue;
+    }
+
+    try {
+      const response = await fetchWithTimeout(
+        url,
+        {
+          method: variant.method || 'GET',
+          headers: buildDuckDuckGoHeaders(variant.type, variant.headers),
+          body: typeof variant.buildBody === 'function' ? variant.buildBody(trimmedQuery) : undefined,
+        },
+        timeoutMs
+      );
+
+      if (!response.ok) {
+        attemptErrors.push(`${variant.name}: HTTP ${response.status}`);
+        continue;
+      }
+
+      let parsed = [];
+      if (variant.type === 'json') {
+        parsed = parseDuckDuckGoInstantAnswer(await response.json());
+      } else {
+        const html = await response.text();
+        parsed = parseDuckDuckGoHtml(html);
+      }
+
+      if (parsed.length) {
+        return parsed;
+      }
+
+      attemptErrors.push(`${variant.name}: empty`);
+    } catch (err) {
+      attemptErrors.push(`${variant.name}: ${err?.message || err}`);
+    }
+  }
+
+  if (attemptErrors.length) {
+    console.warn(
+      `DuckDuckGo search attempts failed for "${trimmedQuery}": ${attemptErrors.join('; ')}`
+    );
+  }
+  return [];
+}
+
+function buildDuckDuckGoHeaders(type, extraHeaders = {}) {
+  const baseHeaders = {
+    'User-Agent': DUCKDUCKGO_USER_AGENT,
+    Accept: type === 'json' ? DUCKDUCKGO_JSON_ACCEPT : DUCKDUCKGO_HTML_ACCEPT,
+  };
+
+  if (!extraHeaders || typeof extraHeaders !== 'object') {
+    return baseHeaders;
+  }
+
+  return { ...baseHeaders, ...extraHeaders };
+}
+
+function parseDuckDuckGoHtml(html) {
+  if (!html) {
+    return [];
+  }
+
+  const $ = cheerio.load(html);
+  const results = [];
+  const seen = new Set();
+
+  const pushResult = (title, snippet, href) => {
+    const normalizedUrl = decodeDuckDuckGoUrl(href);
+    if (!normalizedUrl || seen.has(normalizedUrl)) {
+      return;
+    }
+    seen.add(normalizedUrl);
+    const cleanTitle = title ? String(title).replace(/\s+/g, ' ').trim() : '';
+    const cleanSnippet = snippet ? String(snippet).replace(/\s+/g, ' ').trim() : '';
+    results.push({
+      title: cleanTitle || normalizedUrl,
+      snippet: cleanSnippet,
+      summary: cleanSnippet,
+      url: normalizedUrl,
+    });
+  };
+
+  $('.result').each((_index, element) => {
+    const node = $(element);
+    const title =
+      node.find('.result__a').text().trim() ||
+      node.find('.result__title').text().trim();
+    const snippet = node.find('.result__snippet').text().trim();
+    const href = node.find('.result__a').attr('href');
+    if (!title && !snippet) {
+      return;
+    }
+    pushResult(title, snippet, href);
+  });
+
+  if (results.length) {
+    return results;
+  }
+
+  $('td.result-link').each((_index, element) => {
+    if (results.length >= 10) {
+      return false;
+    }
+    const cell = $(element);
+    const anchor = cell.find('a').first();
+    const href = anchor.attr('href');
+    if (!href) {
+      return;
+    }
+    const title = anchor.text().trim();
+    const snippetRow = cell.closest('tr').next('tr');
+    const snippet =
+      snippetRow.find('td.result-snippet').text().trim() || snippetRow.text().trim();
+    pushResult(title, snippet, href);
+  });
+
+  if (results.length) {
+    return results;
+  }
+
+  $('a.result__a').each((_index, element) => {
+    if (results.length >= 10) {
+      return false;
+    }
+    const anchor = $(element);
+    const href = anchor.attr('href');
+    if (!href) {
+      return;
+    }
+    const title = anchor.text().trim();
+    const snippet =
+      anchor.closest('.links_main').find('.result__snippet').text().trim() || '';
+    pushResult(title, snippet, href);
+  });
+
+  return results;
+}
+
+function parseDuckDuckGoInstantAnswer(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+
+  const entries = [];
+  const seen = new Set();
+
+  const pushResult = (title, snippet, href) => {
+    if (!href) {
+      return;
+    }
+    const normalizedUrl = decodeDuckDuckGoUrl(href);
+    if (!normalizedUrl || seen.has(normalizedUrl)) {
+      return;
+    }
+    seen.add(normalizedUrl);
+    const cleanTitle = title ? String(title).trim() : '';
+    const cleanSnippet = snippet ? String(snippet).trim() : '';
+    entries.push({
+      title: cleanTitle || normalizedUrl,
+      snippet: cleanSnippet,
+      summary: cleanSnippet,
+      url: normalizedUrl,
+    });
+  };
+
+  if (payload.AbstractURL && payload.AbstractText) {
+    pushResult(payload.Heading || payload.AbstractText, payload.AbstractText, payload.AbstractURL);
+  }
+
+  const relatedTopics = Array.isArray(payload.RelatedTopics) ? payload.RelatedTopics : [];
+  relatedTopics.forEach((topic) => {
+    if (topic && Array.isArray(topic.Topics)) {
+      topic.Topics.forEach((nested) => pushResult(nested?.Text, nested?.Text, nested?.FirstURL));
+    } else {
+      pushResult(topic?.Text, topic?.Text, topic?.FirstURL);
+    }
+  });
+
+  return entries.slice(0, 8);
 }
 
 function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
@@ -2331,6 +3236,378 @@ function extractPageSummary(html, options = {}) {
   }
 
   return summaryParts.join(' ').trim();
+}
+
+function clampDeepResearchIterations(value) {
+  const numeric = Number.isFinite(value) ? Number(value) : DEFAULT_DEEP_RESEARCH_ITERATIONS;
+  return Math.max(
+    MIN_DEEP_RESEARCH_ITERATIONS,
+    Math.min(MAX_DEEP_RESEARCH_ITERATIONS, Math.round(numeric))
+  );
+}
+
+function buildInitialResearchQueries(topic, extraQueries = []) {
+  const queries = [];
+  const normalizedTopic = typeof topic === 'string' ? topic.replace(/\s+/g, ' ').trim() : '';
+  if (normalizedTopic) {
+    const segments = normalizedTopic
+      .split(/[?!.;]/)
+      .map((segment) => segment.replace(/\s+/g, ' ').trim())
+      .filter((segment) => segment.length >= 6);
+    let expanded = [];
+    segments.forEach((segment) => {
+      expanded = expanded.concat(expandCompositeSegment(segment));
+    });
+    if (!expanded.length) {
+      expanded = [normalizedTopic];
+    }
+    expanded.forEach((segment) => {
+      if (segment && !queries.includes(segment)) {
+        queries.push(segment);
+      }
+    });
+  }
+
+  if (Array.isArray(extraQueries)) {
+    extraQueries.forEach((value) => {
+      if (typeof value === 'string' && value.trim()) {
+        const normalized = value.trim();
+        if (!queries.includes(normalized)) {
+          queries.push(normalized);
+        }
+      }
+    });
+  }
+
+  return queries.slice(0, DEEP_RESEARCH_MAX_QUERY_POOL);
+}
+
+function expandCompositeSegment(segment) {
+  const trimmed = (segment || '').trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const splitNeeded = /,\s+| and | & | plus | along with | as well as /i.test(trimmed);
+  if (!splitNeeded) {
+    return [trimmed];
+  }
+
+  const parts = trimmed
+    .split(/\s*(?:,| and | & | plus | along with | as well as )\s*/i)
+    .map((part) => part.replace(/^(?:and|or)\s+/i, '').trim().replace(/[.?!]+$/, ''))
+    .filter((part) => part && part.length >= 3);
+
+  if (parts.length <= 1) {
+    return [trimmed];
+  }
+
+  const prefixMatch = trimmed.match(/^(.*?\b(?:on|about|regarding)\b)/i);
+  return parts.map((part) => {
+    const candidate = prefixMatch && !/^(?:what|who|where|when|why|how)/i.test(part)
+      ? `${prefixMatch[1]} ${part}`.trim()
+      : part;
+    if (!/latest|current|recent|today|breaking/i.test(candidate) && !/^(?:who|what|where|when|why|how)/i.test(candidate)) {
+      return `latest ${candidate}`.trim();
+    }
+    return candidate;
+  });
+}
+
+function filterFreshEntries(entries, seenUrls, limit) {
+  const result = [];
+  if (!Array.isArray(entries)) {
+    return result;
+  }
+  const max = Math.max(1, Number.isFinite(limit) ? Number(limit) : DEEP_RESEARCH_FINDINGS_PER_PASS);
+  entries.forEach((entry) => {
+    if (result.length >= max) {
+      return;
+    }
+    const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
+    if (!url) {
+      return;
+    }
+    if (seenUrls.has(url)) {
+      return;
+    }
+    seenUrls.add(url);
+    result.push(entry);
+  });
+  return result;
+}
+
+function summarizeDeepResearchEntries(entries) {
+  if (!Array.isArray(entries) || !entries.length) {
+    return [];
+  }
+  return entries.slice(0, DEEP_RESEARCH_FINDINGS_PER_PASS).map((entry) => ({
+    title: entry.title || entry.url || 'Result',
+    url: entry.url || '',
+    summary: sanitizeFindingSummary(entry.summary || entry.snippet || ''),
+  }));
+}
+
+function sanitizeFindingSummary(text, maxLength = 220) {
+  if (!text) {
+    return '';
+  }
+  const normalized = String(text).replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (!Number.isFinite(maxLength) || maxLength <= 0) {
+    return normalized;
+  }
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
+}
+
+function deriveFollowUpQueries(entries, topic, existingQueries = []) {
+  if (!Array.isArray(entries) || !entries.length) {
+    return [];
+  }
+  const keywordScores = new Map();
+  const topicTokens = extractKeywordCandidates(topic);
+  const topicTokenSet = new Set(topicTokens);
+  const existingSet = new Set(
+    (existingQueries || [])
+      .map((value) => (typeof value === 'string' ? value.toLowerCase() : ''))
+      .filter(Boolean)
+  );
+
+  entries.forEach((entry) => {
+    const text = [entry.title, entry.summary, entry.snippet].filter(Boolean).join(' ');
+    const tokens = extractKeywordCandidates(text);
+    tokens.forEach((token) => {
+      if (topicTokenSet.has(token)) {
+        return;
+      }
+      keywordScores.set(token, (keywordScores.get(token) || 0) + 1);
+    });
+  });
+
+  const sortedTokens = Array.from(keywordScores.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([token]) => token);
+
+  const suggestions = [];
+  sortedTokens.forEach((token) => {
+    if (suggestions.length >= 2) {
+      return;
+    }
+    if (!token || token.length < 4) {
+      return;
+    }
+    const candidate = `${topic} ${token}`;
+    const normalized = candidate.toLowerCase();
+    if (existingSet.has(normalized)) {
+      return;
+    }
+    suggestions.push(candidate);
+    existingSet.add(normalized);
+  });
+
+  return suggestions;
+}
+
+function extractKeywordCandidates(text) {
+  if (!text) {
+    return [];
+  }
+  return String(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token && token.length > 2 && !TOKEN_STOP_WORDS.has(token));
+}
+
+function buildDeepResearchSummary(topic, timeline = [], finalAnswer = '') {
+  const sanitizedTopic = typeof topic === 'string' && topic.trim() ? topic.trim() : 'Unknown topic';
+  const lines = [
+    `Deep research topic: ${sanitizedTopic}`,
+    `Passes completed: ${timeline.length}`,
+  ];
+  const trimmedAnswer = typeof finalAnswer === 'string' ? finalAnswer.trim() : '';
+  const findingsLines = [];
+  const sources = [];
+  const seenSources = new Set();
+
+  timeline.forEach((entry) => {
+    const passHeader = `Pass ${entry.iteration || '?'} (${entry.query || 'untitled query'})`;
+    if (!entry.findings?.length) {
+      findingsLines.push(`${passHeader}: No new sources captured.`);
+      if (entry.review) {
+        findingsLines.push(`  Review: ${entry.review}`);
+      }
+      findingsLines.push('');
+      return;
+    }
+    findingsLines.push(`${passHeader}:`);
+    entry.findings.forEach((finding) => {
+      const title = finding.title || finding.url || 'Source';
+      findingsLines.push(`• ${title}`);
+      if (finding.summary) {
+        findingsLines.push(`  ${finding.summary}`);
+      }
+      if (finding.url) {
+        findingsLines.push(`  Source: ${finding.url}`);
+        if (!seenSources.has(finding.url)) {
+          seenSources.add(finding.url);
+          sources.push({ title, url: finding.url });
+        }
+      }
+    });
+    if (entry.review) {
+      findingsLines.push(`  Review: ${entry.review}`);
+    }
+    findingsLines.push('');
+  });
+
+  if (!findingsLines.length) {
+    findingsLines.push('No sources were discovered during this run.');
+  }
+
+  const combined = [...lines, '', ...findingsLines].join('\n').trim();
+  const limitedSummary =
+    combined.length > DEEP_RESEARCH_MAX_SUMMARY_CHARS
+      ? `${combined.slice(0, DEEP_RESEARCH_MAX_SUMMARY_CHARS - 1)}…`
+      : combined;
+
+  return {
+    summary: limitedSummary,
+    sources,
+    answer: trimmedAnswer,
+  };
+}
+
+function buildResearchReflection(topic, memoryEntries = [], existingQueries = []) {
+  if (!Array.isArray(memoryEntries) || !memoryEntries.length) {
+    return { summary: '', nextQueries: [] };
+  }
+
+  const uniqueSources = new Set();
+  const domainCounts = new Map();
+
+  memoryEntries.forEach((entry) => {
+    const url = typeof entry?.url === 'string' ? entry.url.trim() : '';
+    if (!url) {
+      return;
+    }
+    uniqueSources.add(url);
+    const host = resolveHostname(url);
+    if (host) {
+      domainCounts.set(host, (domainCounts.get(host) || 0) + 1);
+    }
+  });
+
+  const topDomains = Array.from(domainCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([host, count]) => `${host} (${count})`);
+
+  const suggestions = deriveFollowUpQueries(memoryEntries, topic, existingQueries);
+  const reviewedCount = uniqueSources.size || memoryEntries.length;
+  const summaryParts = [
+    `Reviewed ${reviewedCount} unique source${reviewedCount === 1 ? '' : 's'} so far.`,
+  ];
+  if (topDomains.length) {
+    summaryParts.push(`Top domains: ${topDomains.join(', ')}.`);
+  }
+  if (suggestions.length) {
+    summaryParts.push(`Next angles: ${suggestions.join('; ')}.`);
+  } else {
+    summaryParts.push('Continuing to scan for fresh coverage.');
+  }
+
+  return {
+    summary: summaryParts.join(' '),
+    nextQueries: suggestions,
+  };
+}
+
+async function generateQuerySuggestions({
+  model,
+  topic,
+  timeline,
+  existingQueries = [],
+  maxSuggestions = 2,
+}) {
+  if (!model || !Array.isArray(timeline) || !timeline.length) {
+    return [];
+  }
+
+  const latestFindings = timeline[timeline.length - 1]?.findings || [];
+  const recapLines = [];
+  timeline.forEach((entry) => {
+    const parts = [];
+    if (Number.isFinite(entry.iteration)) {
+      parts.push(`Pass ${entry.iteration}`);
+    }
+    if (entry.query) {
+      parts.push(`Query: ${entry.query}`);
+    }
+    if (Array.isArray(entry.findings) && entry.findings.length) {
+      entry.findings.slice(0, 2).forEach((finding, index) => {
+        parts.push(
+          `Finding ${index + 1}: ${finding.title || finding.url || 'Source'}${
+            finding.summary ? ` — ${finding.summary}` : ''
+          }`
+        );
+      });
+    } else if (entry.review) {
+      parts.push(`Review: ${entry.review}`);
+    }
+    if (parts.length) {
+      recapLines.push(parts.join('\n'));
+    }
+  });
+
+  const messages = [
+    {
+      role: 'system',
+      content:
+        'You are a research strategist. Suggest short, precise web search queries that would unlock new information, given the findings so far. Reply ONLY with JSON: {"queries":["...","..."]}',
+    },
+    {
+      role: 'user',
+      content: [
+        `Overall question: ${topic}`,
+        '',
+        'Findings so far:',
+        recapLines.join('\n\n') || '(none)',
+        '',
+        `Latest findings (${latestFindings.length}):`,
+        latestFindings
+          .map(
+            (finding, index) =>
+              `${index + 1}. ${finding.title || finding.url || 'Source'}${
+                finding.summary ? ` — ${finding.summary}` : ''
+              }`
+          )
+          .join('\n') || '(none)',
+        '',
+        `Existing query set: ${existingQueries.join(', ') || '(none)'}`,
+        '',
+        `Suggest up to ${maxSuggestions} new queries that differ from the existing set and cover uncovered angles.`,
+      ].join('\n'),
+    },
+  ];
+
+  try {
+    const response = await chatCompletion(model, messages, { timeoutMs: 20000 });
+    const parsed = extractJsonObjectFromText(response.content);
+    if (!parsed || !Array.isArray(parsed.queries)) {
+      return [];
+    }
+    return parsed.queries
+      .map((query) => (typeof query === 'string' ? query.trim() : ''))
+      .filter((query) => query && !existingQueries.includes(query))
+      .slice(0, maxSuggestions);
+  } catch (err) {
+    console.error('Failed to generate model-query suggestions:', err);
+    return [];
+  }
 }
 
 function createSearchPlan(prompt, prefs = getDefaultSettings(), userPrompt = '', options = {}) {
@@ -2752,6 +4029,17 @@ function formatReadableDate(isoString) {
   }
 }
 
+function resolveHostname(url) {
+  if (!url || typeof url !== 'string') {
+    return '';
+  }
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch (err) {
+    return '';
+  }
+}
+
 function formatSearchEntries(entries, retrievedAt, queries) {
   const header = [
     `Fresh context collected ${formatReadableDate(retrievedAt)}:`,
@@ -2770,12 +4058,8 @@ function formatSearchEntries(entries, retrievedAt, queries) {
         lines.push(entry.snippet);
       }
       if (entry.url) {
-        try {
-          const host = new URL(entry.url).hostname.replace(/^www\./, '');
-          lines.push(`Source: ${host} (${entry.url})`);
-        } catch (err) {
-          lines.push(`Source: ${entry.url}`);
-        }
+        const host = resolveHostname(entry.url);
+        lines.push(host ? `Source: ${host} (${entry.url})` : `Source: ${entry.url}`);
       }
       return lines.join('\n');
     })
@@ -2789,19 +4073,48 @@ function decodeDuckDuckGoUrl(href) {
     return '';
   }
 
+  const raw = String(href).trim();
+  if (!raw || raw === '#') {
+    return '';
+  }
+
+  const ensureAbsolute = (value) => {
+    if (value.startsWith('http://') || value.startsWith('https://')) {
+      return value;
+    }
+    if (value.startsWith('//')) {
+      return `https:${value}`;
+    }
+    const needsSlash = value.startsWith('/') ? '' : '/';
+    return `https://duckduckgo.com${needsSlash}${value}`;
+  };
+
   try {
-    const absolute = href.startsWith('http') ? href : `https://duckduckgo.com${href}`;
+    const absolute = ensureAbsolute(raw);
     const url = new URL(absolute);
 
-    if (url.hostname.includes('duckduckgo.com') && url.pathname === '/l/') {
-      const target = url.searchParams.get('uddg');
+    if (url.hostname.includes('duckduckgo.com')) {
+      const target =
+        url.searchParams.get('uddg') ||
+        url.searchParams.get('u') ||
+        url.searchParams.get('rut');
       if (target) {
-        return decodeURIComponent(target);
+        try {
+          return decodeURIComponent(target);
+        } catch (err) {
+          return target;
+        }
       }
     }
 
     return absolute;
   } catch (err) {
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return raw;
+    }
+    if (raw.startsWith('//')) {
+      return `https:${raw}`;
+    }
     return '';
   }
 }
@@ -2926,6 +4239,78 @@ function sanitizeAttachmentsPayload(rawAttachments = []) {
   return { entries, summary, block, warnings };
 }
 
+function normalizeDeepResearchMeta(rawDeepResearch) {
+  if (!rawDeepResearch || typeof rawDeepResearch !== 'object') {
+    return null;
+  }
+  const summary =
+    typeof rawDeepResearch.summary === 'string' && rawDeepResearch.summary.trim()
+      ? rawDeepResearch.summary.trim()
+      : '';
+  const answer =
+    typeof rawDeepResearch.answer === 'string' && rawDeepResearch.answer.trim()
+      ? rawDeepResearch.answer.trim()
+      : '';
+  const sources = Array.isArray(rawDeepResearch.sources)
+    ? rawDeepResearch.sources
+        .map((entry) => {
+          if (!entry || typeof entry !== 'object') {
+            return null;
+          }
+          const title = typeof entry.title === 'string' ? entry.title.trim() : '';
+          const url = typeof entry.url === 'string' ? entry.url.trim() : '';
+          if (!title && !url) {
+            return null;
+          }
+          return {
+            title: title || null,
+            url: url || null,
+          };
+        })
+        .filter(Boolean)
+        .slice(0, 5)
+    : [];
+
+  if (!summary && !sources.length && !answer) {
+    return null;
+  }
+
+  return { summary, sources, answer };
+}
+
+function buildDeepResearchContextBlock(meta) {
+  if (!meta) {
+    return '';
+  }
+
+  const lines = [];
+  if (meta.answer) {
+    lines.push('Preliminary deep research response:');
+    lines.push(meta.answer);
+    lines.push('');
+  }
+  lines.push('These findings were gathered specifically for this request; do not reference prior research or earlier chats unless the user explicitly mentions them.');
+  lines.push('');
+  if (meta.summary) {
+    lines.push('Deep research findings:');
+    lines.push(meta.summary);
+  }
+
+  if (Array.isArray(meta.sources) && meta.sources.length) {
+    if (lines.length) {
+      lines.push('');
+    }
+    lines.push('Deep research sources:');
+    meta.sources.forEach((source, index) => {
+      const label = source.title || `Source ${index + 1}`;
+      const link = source.url ? ` — ${source.url}` : '';
+      lines.push(`• ${label}${link}`);
+    });
+  }
+
+  return lines.join('\n').trim();
+}
+
 function sanitizeStoredAttachments(rawAttachments = []) {
   if (!Array.isArray(rawAttachments) || !rawAttachments.length) {
     return [];
@@ -2991,6 +4376,31 @@ function sanitizeStoredAttachments(rawAttachments = []) {
   }
 
   return sanitized;
+}
+
+function resolveChatInitialGoal(chat) {
+  if (!chat) {
+    return '';
+  }
+  if (typeof chat.initialUserPrompt === 'string' && chat.initialUserPrompt.trim()) {
+    return chat.initialUserPrompt.trim();
+  }
+  const firstUser = Array.isArray(chat.messages)
+    ? chat.messages.find((message) => message?.role === 'user' && typeof message.content === 'string' && message.content.trim())
+    : null;
+  return firstUser?.content?.trim() || '';
+}
+
+function buildPrimaryAlignedTopic(primaryGoal, latestPrompt) {
+  const goal = typeof primaryGoal === 'string' ? primaryGoal.trim() : '';
+  const latest = typeof latestPrompt === 'string' ? latestPrompt.trim() : '';
+  if (goal && latest) {
+    if (latest.toLowerCase().includes(goal.toLowerCase())) {
+      return latest;
+    }
+    return `${goal}\nFollow-up focus: ${latest}`;
+  }
+  return goal || latest;
 }
 
 function buildAttachmentsContext(entries) {
