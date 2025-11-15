@@ -16,8 +16,33 @@
       <header>
         <div class="model-controls">
           <button id="newChatBtn" type="button" aria-label="Start new chat">+ New Chat</button>
-          <label for="modelSelect">Model:</label>
-          <select id="modelSelect" aria-label="DioxideAi model selector"></select>
+          <div class="model-picker">
+            <label id="modelPickerLabel" for="modelPickerButton">Model:</label>
+            <div class="model-picker-field">
+              <button
+                id="modelPickerButton"
+                class="model-picker-button"
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-labelledby="modelPickerLabel modelPickerCurrent"
+                aria-controls="modelPickerMenu"
+                disabled
+              >
+                <span id="modelPickerCurrent" class="model-picker-current">Loading models…</span>
+                <span class="model-picker-caret" aria-hidden="true"></span>
+              </button>
+              <div
+                id="modelPickerMenu"
+                class="model-picker-menu hidden"
+                role="listbox"
+                tabindex="-1"
+                aria-labelledby="modelPickerLabel"
+                aria-hidden="true"
+              ></div>
+            </div>
+            <select id="modelSelect" aria-label="DioxideAi model selector" hidden aria-hidden="true"></select>
+          </div>
         </div>
         <div class="header-actions">
           <button
@@ -194,13 +219,6 @@
               <option value="light">Light</option>
               <option value="dark">Dark</option>
             </select>
-          </label>
-          <label class="setting-toggle">
-            <input type="checkbox" id="sidebarCollapseToggle" />
-            <span>
-              <strong>Hide chat history sidebar</strong>
-              <small>Collapse the previous chats panel by default.</small>
-            </span>
           </label>
 
           <div class="settings-actions">

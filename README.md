@@ -49,7 +49,6 @@ Open the gear icon to reveal the modal preferences panel:
 - **Automatic web search** – opt out if you need fully offline replies.
 - **Max search results** – number of snippets captured per prompt (1–12).
 - **Theme** – follow macOS/Windows appearance or force Light/Dark (neon terminal mode).
-- **Hide chat history sidebar** – collapse the sidebar by default.
 - **Model server endpoint** – URL used for `/api/tags` and `/api/chat` (defaults to `http://localhost:11434`). Point this at your ChatGPT-compatible server when not using Ollama.
 - **llama.cpp / ChatGPT-compatible mode** – makes the app talk to OpenAI-style `/v1/models` and `/v1/chat/completions` endpoints (llama.cpp, LM Studio, etc.).
 - **Share anonymous usage analytics** – opt in/out of Amplitude tracking.

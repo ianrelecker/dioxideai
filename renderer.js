@@ -1,6 +1,9 @@
 const urlRegex = /https?:\/\/[^\s]+/gi;
 
 let modelSelect;
+let modelPickerButton;
+let modelPickerCurrent;
+let modelPickerMenu;
 let refreshModelsButton;
 let chatListNav;
 let newChatButton;
@@ -16,7 +19,6 @@ let settingsPanel;
 let settingsCloseButton;
 let settingsForm;
 let themeSelect;
-let sidebarCollapseToggle;
 let deleteAllChatsButton;
 let tutorialOverlay;
 let tutorialPanel;
@@ -53,7 +55,6 @@ const DEFAULT_SETTINGS = {
   openThoughtsByDefault: false,
   searchResultLimit: 10,
   theme: 'system',
-  sidebarCollapsed: false,
   showTutorial: true,
   shareAnalytics: true,
   ollamaEndpoint: 'http://localhost:11434',
@@ -66,6 +67,7 @@ const ATTACHMENT_TOTAL_BYTES = 1024 * 1024;
 const ATTACHMENT_CHAR_LIMIT = 4000;
 const DEFAULT_DEEP_RESEARCH_ITERATIONS = 4;
 const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+const MODEL_LABEL_CHAR_LIMIT = 30;
 
 const state = {
   chats: [],
@@ -84,6 +86,7 @@ const state = {
   attachmentProcessingStartedAt: null,
   sidebarCollapsed: true,
   deepResearch: createDeepResearchState(),
+  models: [],
 };
 
 if (prefersDark) {
@@ -108,6 +111,8 @@ let attachmentStatusTimer = null;
 const ATTACHMENT_STATUS_REFRESH_MS = 1000;
 let analyticsInitialized = false;
 let analyticsReady = false;
+let modelPickerOpen = false;
+let modelPickerActiveIndex = -1;
 
 const createRequestId = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
@@ -867,6 +872,9 @@ function applyAttachmentSelection(result) {
 window.addEventListener('DOMContentLoaded', async () => {
 
   modelSelect = document.getElementById('modelSelect');
+  modelPickerButton = document.getElementById('modelPickerButton');
+  modelPickerCurrent = document.getElementById('modelPickerCurrent');
+  modelPickerMenu = document.getElementById('modelPickerMenu');
   refreshModelsButton = document.getElementById('refreshModels');
   chatListNav = document.getElementById('chatList');
   newChatButton = document.getElementById('newChatBtn');
@@ -882,7 +890,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   settingsCloseButton = document.getElementById('settingsCloseBtn');
   settingsForm = document.getElementById('settingsForm');
   themeSelect = document.getElementById('themeSelect');
-  sidebarCollapseToggle = document.getElementById('sidebarCollapseToggle');
   deleteAllChatsButton = document.getElementById('deleteAllChatsBtn');
   tutorialOverlay = document.getElementById('tutorialOverlay');
   tutorialPanel = document.getElementById('tutorialPanel');
@@ -918,6 +925,26 @@ window.addEventListener('DOMContentLoaded', async () => {
   deepResearchDetails = document.getElementById('deepResearchDetails');
 
   registerGlobalDropGuards();
+
+  if (modelPickerButton && modelPickerMenu) {
+    modelPickerButton.addEventListener('click', () => {
+      if (modelPickerOpen) {
+        closeModelPickerMenu({ focusButton: false });
+      } else {
+        openModelPickerMenu();
+      }
+    });
+    modelPickerButton.addEventListener('keydown', handleModelPickerButtonKeydown);
+    modelPickerMenu.addEventListener('keydown', handleModelPickerMenuKeydown);
+    modelPickerMenu.addEventListener('click', (event) => {
+      const target = event.target?.closest('.model-picker-option');
+      if (!target) {
+        return;
+      }
+      event.preventDefault();
+      handleModelPickerSelection(target.dataset.value);
+    });
+  }
 
   try {
     registerStreamHandlers();
@@ -1000,7 +1027,6 @@ function registerUIListeners() {
   sidebarToggleBtn?.addEventListener('click', () => {
     const nextValue = !state.sidebarCollapsed;
     updateSidebarState(nextValue);
-    applySettingsUpdate({ sidebarCollapsed: nextValue });
   });
 
   settingsButton?.addEventListener('click', openSettingsPanel);
@@ -1022,11 +1048,6 @@ function registerUIListeners() {
     const nextTheme = themeSelect.value;
     applyTheme(nextTheme);
     applySettingsUpdate({ theme: nextTheme });
-  });
-  sidebarCollapseToggle?.addEventListener('change', () => {
-    const next = sidebarCollapseToggle.checked;
-    updateSidebarState(next);
-    applySettingsUpdate({ sidebarCollapsed: next });
   });
   shareAnalyticsToggle?.addEventListener('change', async () => {
     const enabled = shareAnalyticsToggle.checked;
@@ -1162,12 +1183,7 @@ function applySettingsToUI() {
     themeSelect.value = prefs.theme || 'system';
   }
 
-  if (sidebarCollapseToggle) {
-    sidebarCollapseToggle.checked = Boolean(prefs.sidebarCollapsed);
-  }
-
-  const collapsed = prefs.sidebarCollapsed !== false;
-  state.sidebarCollapsed = collapsed;
+  const collapsed = state.sidebarCollapsed !== false;
   updateSidebarState(collapsed);
   applyTheme(prefs.theme || DEFAULT_SETTINGS.theme);
 
@@ -1984,17 +2000,275 @@ function maybeResetDeepResearchForChat(chatId) {
 }
 
 function renderNoModelsPlaceholder() {
-  modelSelect.innerHTML = '';
-  const option = document.createElement('option');
-  option.textContent = 'No Models Found';
-  option.value = '';
-  option.disabled = true;
-  option.selected = true;
-  modelSelect.appendChild(option);
+  if (modelSelect) {
+    modelSelect.innerHTML = '';
+    const option = document.createElement('option');
+    option.textContent = '';
+    option.value = '';
+    option.disabled = true;
+    option.selected = true;
+    modelSelect.appendChild(option);
+  }
+  state.models = [];
+  renderModelPickerMenu([]);
+  updateModelPickerDisplay();
+  setModelPickerDisabled(true);
+}
+
+function formatModelPickerLabel(name, maxChars = MODEL_LABEL_CHAR_LIMIT) {
+  if (typeof name !== 'string' || !name.trim()) {
+    return '';
+  }
+  if (name.length <= maxChars) {
+    return name;
+  }
+  const limit = Math.max(maxChars - 1, 1);
+  return `${name.slice(0, limit)}…`;
+}
+
+function setModelPickerDisabled(disabled) {
+  if (!modelPickerButton) {
+    return;
+  }
+  const isDisabled = Boolean(disabled);
+  modelPickerButton.disabled = isDisabled;
+  if (isDisabled) {
+    modelPickerButton.setAttribute('aria-disabled', 'true');
+  } else {
+    modelPickerButton.removeAttribute('aria-disabled');
+  }
+  if (disabled) {
+    closeModelPickerMenu({ focusButton: false });
+  }
+}
+
+function updateModelPickerDisplay() {
+  if (!modelPickerButton || !modelPickerCurrent) {
+    return;
+  }
+  const currentValue = modelSelect?.value || '';
+  const hasModels = Boolean(state.models?.length);
+  const baseLabel = hasModels ? 'Select a model' : 'No models found';
+  if (!currentValue) {
+    modelPickerCurrent.textContent = baseLabel;
+    modelPickerButton.title = baseLabel;
+    return;
+  }
+  const truncated = formatModelPickerLabel(currentValue);
+  modelPickerCurrent.textContent = truncated || currentValue;
+  modelPickerButton.title = currentValue;
+}
+
+function renderModelPickerMenu(models = []) {
+  if (!modelPickerMenu) {
+    return;
+  }
+  const wasOpen = modelPickerOpen;
+  if (wasOpen) {
+    closeModelPickerMenu({ focusButton: false });
+  }
+  modelPickerMenu.innerHTML = '';
+  if (!models.length) {
+    const empty = document.createElement('p');
+    empty.className = 'model-picker-empty';
+    empty.textContent = 'No models available';
+    modelPickerMenu.appendChild(empty);
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  models.forEach((name) => {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'model-picker-option';
+    option.setAttribute('role', 'option');
+    option.setAttribute('tabindex', '-1');
+    option.dataset.value = name;
+    option.textContent = name;
+    fragment.appendChild(option);
+  });
+  modelPickerMenu.appendChild(fragment);
+  syncModelPickerSelection();
+}
+
+function syncModelPickerSelection(scrollIntoView = false) {
+  if (!modelPickerMenu) {
+    return;
+  }
+  const options = modelPickerMenu.querySelectorAll('.model-picker-option');
+  const value = modelSelect?.value || '';
+  let nextActiveIndex = -1;
+  options.forEach((option, index) => {
+    const isSelected = option.dataset.value === value;
+    option.classList.toggle('selected', isSelected);
+    option.setAttribute('aria-selected', String(isSelected));
+    if (isSelected) {
+      nextActiveIndex = index;
+      if (scrollIntoView) {
+        option.scrollIntoView({ block: 'nearest' });
+      }
+    }
+  });
+  modelPickerActiveIndex = nextActiveIndex;
+  options.forEach((option, index) => {
+    option.classList.toggle('active', index === modelPickerActiveIndex);
+  });
+}
+
+function handleModelPickerSelection(value) {
+  if (!value || !modelSelect) {
+    return;
+  }
+  if (modelSelect.value === value) {
+    updateModelPickerDisplay();
+    closeModelPickerMenu({ focusButton: true });
+    return;
+  }
+  modelSelect.value = value;
+  updateModelPickerDisplay();
+  syncModelPickerSelection();
+  closeModelPickerMenu({ focusButton: true });
+}
+
+function openModelPickerMenu() {
+  if (!modelPickerMenu || !modelPickerButton || modelPickerOpen || modelPickerButton.disabled) {
+    return;
+  }
+  if (!state.models?.length) {
+    return;
+  }
+  modelPickerMenu.classList.remove('hidden');
+  modelPickerMenu.setAttribute('aria-hidden', 'false');
+  modelPickerButton.setAttribute('aria-expanded', 'true');
+  modelPickerOpen = true;
+  syncModelPickerSelection(true);
+  focusModelPickerOption(modelPickerActiveIndex >= 0 ? modelPickerActiveIndex : 0);
+  document.addEventListener('pointerdown', handleModelPickerPointerDown, true);
+  document.addEventListener('keydown', handleModelPickerEscape, true);
+}
+
+function closeModelPickerMenu({ focusButton = false } = {}) {
+  if (!modelPickerMenu || !modelPickerOpen) {
+    return;
+  }
+  modelPickerMenu.classList.add('hidden');
+  modelPickerMenu.setAttribute('aria-hidden', 'true');
+  if (modelPickerButton) {
+    modelPickerButton.setAttribute('aria-expanded', 'false');
+  }
+  modelPickerOpen = false;
+  document.removeEventListener('pointerdown', handleModelPickerPointerDown, true);
+  document.removeEventListener('keydown', handleModelPickerEscape, true);
+  if (focusButton && modelPickerButton) {
+    modelPickerButton.focus();
+  }
+}
+
+function focusModelPickerOption(index) {
+  if (!modelPickerMenu) {
+    return;
+  }
+  const options = modelPickerMenu.querySelectorAll('.model-picker-option');
+  if (!options.length) {
+    return;
+  }
+  let targetIndex = index;
+  if (!Number.isFinite(targetIndex) || targetIndex < 0) {
+    targetIndex = 0;
+  }
+  if (targetIndex >= options.length) {
+    targetIndex = options.length - 1;
+  }
+  const targetOption = options[targetIndex];
+  targetOption.focus();
+  modelPickerActiveIndex = targetIndex;
+  options.forEach((option, idx) => {
+    option.classList.toggle('active', idx === modelPickerActiveIndex);
+  });
+}
+
+function handleModelPickerPointerDown(event) {
+  if (!modelPickerOpen) {
+    return;
+  }
+  const target = event.target;
+  if (modelPickerButton?.contains(target) || modelPickerMenu?.contains(target)) {
+    return;
+  }
+  closeModelPickerMenu();
+}
+
+function handleModelPickerEscape(event) {
+  if (!modelPickerOpen) {
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeModelPickerMenu({ focusButton: true });
+  }
+}
+
+function handleModelPickerButtonKeydown(event) {
+  if (event.key === 'ArrowDown' || event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    openModelPickerMenu();
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    if (!modelPickerOpen) {
+      openModelPickerMenu();
+      focusModelPickerOption(state.models.length - 1);
+    }
+  }
+}
+
+function handleModelPickerMenuKeydown(event) {
+  if (!modelPickerOpen) {
+    return;
+  }
+  const options = modelPickerMenu?.querySelectorAll('.model-picker-option') || [];
+  if (!options.length) {
+    return;
+  }
+  switch (event.key) {
+    case 'ArrowDown':
+      event.preventDefault();
+      focusModelPickerOption(Math.min(modelPickerActiveIndex + 1, options.length - 1));
+      break;
+    case 'ArrowUp':
+      event.preventDefault();
+      focusModelPickerOption(Math.max(modelPickerActiveIndex - 1, 0));
+      break;
+    case 'Home':
+      event.preventDefault();
+      focusModelPickerOption(0);
+      break;
+    case 'End':
+      event.preventDefault();
+      focusModelPickerOption(options.length - 1);
+      break;
+    case 'Enter':
+    case ' ':
+      event.preventDefault();
+      if (modelPickerActiveIndex >= 0 && modelPickerActiveIndex < options.length) {
+        const value = options[modelPickerActiveIndex].dataset.value;
+        handleModelPickerSelection(value);
+      }
+      break;
+    case 'Tab':
+      closeModelPickerMenu();
+      break;
+    default:
+      break;
+  }
 }
 
 async function populateModels() {
   setModelControlsDisabled(true);
+  if (modelPickerCurrent) {
+    modelPickerCurrent.textContent = 'Loading models…';
+  }
+  if (modelPickerButton) {
+    modelPickerButton.title = 'Loading models…';
+  }
   const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
   const usingChatCompat = Boolean(state.settings?.useOpenAICompatibleEndpoint);
   const providerLabel = usingChatCompat ? 'ChatGPT-compatible endpoint' : 'Ollama server';
@@ -2003,10 +2277,12 @@ async function populateModels() {
   updateModelStatus(`Checking ${providerStatus}…`, 'loading');
 
   try {
-    const models = await window.api.getModels();
+    const modelsResponse = await window.api.getModels();
     modelSelect.innerHTML = '';
+    const models = Array.isArray(modelsResponse) ? modelsResponse : [];
+    state.models = models;
 
-    if (!models.length) {
+    if (!state.models.length) {
       renderNoModelsPlaceholder();
       const toastMessage = usingChatCompat
         ? `No models were reported by your ${providerShort} at ${endpoint}. Confirm it exposes /v1/models and refresh.`
@@ -2019,14 +2295,27 @@ async function populateModels() {
       return;
     }
 
-    models.forEach((name) => {
+    const previousValue = modelSelect.value;
+    const fragment = document.createDocumentFragment();
+    state.models.forEach((name) => {
       const option = document.createElement('option');
       option.value = name;
       option.textContent = name;
-      modelSelect.appendChild(option);
+      fragment.appendChild(option);
     });
-    const countLabel = models.length === 1 ? 'model' : 'models';
-    updateModelStatus(`Connected: ${models.length} ${countLabel} available via ${providerStatus}.`, 'success');
+    modelSelect.appendChild(fragment);
+    if (previousValue && state.models.includes(previousValue)) {
+      modelSelect.value = previousValue;
+    } else {
+      modelSelect.value = state.models[0];
+    }
+
+    renderModelPickerMenu(state.models);
+    updateModelPickerDisplay();
+    setModelPickerDisabled(false);
+
+    const countLabel = state.models.length === 1 ? 'model' : 'models';
+    updateModelStatus(`Connected: ${state.models.length} ${countLabel} available via ${providerStatus}.`, 'success');
   } catch (err) {
     console.error(err);
     renderNoModelsPlaceholder();
@@ -2061,9 +2350,11 @@ async function handlePromptSubmit() {
   const model = modelSelect.value;
 
   if (!model) {
-    modelSelect.classList.add('attention');
-    modelSelect.focus();
-    setTimeout(() => modelSelect.classList.remove('attention'), 800);
+    if (modelPickerButton) {
+      modelPickerButton.classList.add('attention');
+      modelPickerButton.focus();
+      setTimeout(() => modelPickerButton.classList.remove('attention'), 800);
+    }
     return;
   }
 
@@ -2734,6 +3025,7 @@ function setModelControlsDisabled(disabled) {
   if (modelSelect) {
     modelSelect.disabled = disabled;
   }
+  setModelPickerDisabled(Boolean(disabled) || !state.models?.length);
   if (refreshModelsButton) {
     refreshModelsButton.disabled = disabled;
   }
@@ -3077,9 +3369,6 @@ function pruneMarkdownWhitespace(root) {
 function updateSidebarState(collapsed) {
   const next = Boolean(collapsed);
   state.sidebarCollapsed = next;
-  if (state.settings) {
-    state.settings.sidebarCollapsed = next;
-  }
   document.body.classList.toggle('sidebar-collapsed', next);
   if (sidebar) {
     sidebar.setAttribute('aria-hidden', next ? 'true' : 'false');
@@ -3087,9 +3376,6 @@ function updateSidebarState(collapsed) {
   if (sidebarToggleBtn) {
     sidebarToggleBtn.setAttribute('aria-pressed', String(next));
     sidebarToggleBtn.textContent = next ? 'Show Chats' : 'Hide Chats';
-  }
-  if (sidebarCollapseToggle && sidebarCollapseToggle.checked !== next) {
-    sidebarCollapseToggle.checked = next;
   }
 }
 

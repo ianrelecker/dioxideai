@@ -29,7 +29,6 @@ const DEFAULT_SETTINGS = {
   openThoughtsByDefault: false,
   searchResultLimit: 10,
   theme: 'system',
-  sidebarCollapsed: false,
   showTutorial: true,
   shareAnalytics: true,
   ollamaEndpoint: 'http://localhost:11434',
@@ -2672,10 +2671,6 @@ function applySettingsPatch(base, partial) {
 
   if (partial.theme !== undefined) {
     next.theme = normalizeTheme(partial.theme);
-  }
-
-  if (partial.sidebarCollapsed !== undefined) {
-    next.sidebarCollapsed = Boolean(partial.sidebarCollapsed);
   }
 
   if (partial.showTutorial !== undefined) {
