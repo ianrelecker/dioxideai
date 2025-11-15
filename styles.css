@@ -161,6 +161,22 @@ body {
   letter-spacing: 0.05em;
 }
 
+.settings-support p {
+  margin: 0;
+  font-size: 0.9rem;
+  color: var(--app-text);
+}
+
+.settings-support a {
+  color: var(--chat-bubble-user);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.settings-support a:hover {
+  text-decoration: underline;
+}
+
 .model-picker {
   display: inline-flex;
   align-items: center;
@@ -980,28 +996,6 @@ body.sidebar-collapsed #sidebar {
   margin-top: 0.4rem;
 }
 
-.stop-generation-btn {
-  padding: 0.35rem 0.9rem;
-  font-size: 0.82rem;
-  border-radius: 999px;
-  border: 1px solid rgba(232, 88, 122, 0.32);
-  background: rgba(255, 120, 146, 0.2);
-  color: #b1364e;
-  cursor: pointer;
-  transition: background 0.2s ease, border 0.2s ease;
-}
-
-.stop-generation-btn:hover:not(:disabled) {
-  background: rgba(255, 134, 158, 0.28);
-  border-color: rgba(255, 134, 158, 0.5);
-}
-
-.stop-generation-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-  transform: none;
-}
-
 details.thoughts {
   background: var(--surface-strong);
   border-radius: 12px;
@@ -1216,6 +1210,23 @@ details.thoughts summary::marker {
 }
 
 #sendBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+#sendBtn.send-btn-stop {
+  background: rgba(255, 120, 146, 0.2);
+  color: #b1364e;
+  border: 1px solid rgba(232, 88, 122, 0.32);
+}
+
+#sendBtn.send-btn-stop:hover:not(:disabled) {
+  background: rgba(255, 134, 158, 0.28);
+  border-color: rgba(255, 134, 158, 0.5);
+  opacity: 1;
+}
+
+#sendBtn.send-btn-stop:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
@@ -1616,13 +1627,13 @@ body.tutorial-open {
   height: 2rem;
   border-radius: 999px;
   border: 1px solid var(--panel-border);
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--surface-strong);
   color: var(--app-text);
   cursor: pointer;
 }
 
 #tutorialCloseBtn:hover {
-  background: rgba(255, 255, 255, 0.9);
+  background: var(--panel-surface);
 }
 
 .tutorial-content {
@@ -1638,8 +1649,9 @@ body.tutorial-open {
 }
 
 .tutorial-content pre {
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--surface-strong);
   border: 1px solid var(--panel-border);
+  color: var(--app-text);
   padding: 0.6rem 0.8rem;
   border-radius: 10px;
   overflow-x: auto;
@@ -1675,7 +1687,7 @@ body.tutorial-open {
   padding: 0.5rem 0.85rem;
   border-radius: 8px;
   border: 1px solid var(--panel-border);
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--surface-strong);
   color: var(--app-text);
   text-decoration: none;
   font-size: 0.85rem;

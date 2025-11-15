@@ -68,6 +68,25 @@ const ATTACHMENT_CHAR_LIMIT = 4000;
 const DEFAULT_DEEP_RESEARCH_ITERATIONS = 4;
 const prefersDark = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 const MODEL_LABEL_CHAR_LIMIT = 30;
+const ANALYTICS_ERROR_MAX_LEN = 160;
+const ANALYTICS_QUEUE_STORAGE_KEY = 'dioxideai.analyticsQueue';
+const ANALYTICS_QUEUE_MAX = 200;
+const ANALYTICS_FLUSH_INTERVAL_MS = 4000;
+const analyticsContext = {
+  appVersion: null,
+  platform: (navigator?.userAgentData && navigator.userAgentData.platform) || navigator?.platform || 'unknown',
+  arch: null,
+  releaseChannel: 'production',
+  electronVersion: null,
+  chromeVersion: null,
+  osVersion: null,
+  locale: (navigator?.languages && navigator.languages.length ? navigator.languages[0] : navigator?.language) || 'en-US',
+  timeZone: (typeof Intl !== 'undefined' && Intl.DateTimeFormat
+    ? Intl.DateTimeFormat().resolvedOptions().timeZone
+    : 'UTC'),
+  gpuAdapter: null,
+  proxyConfigured: false,
+};
 
 const state = {
   chats: [],
@@ -87,6 +106,11 @@ const state = {
   sidebarCollapsed: true,
   deepResearch: createDeepResearchState(),
   models: [],
+  webSearchStartedAt: null,
+  lastWebSearchDurationMs: null,
+  lastPromptMetrics: null,
+  lastAttachmentIngestDurationMs: null,
+  stopRequested: false,
 };
 
 if (prefersDark) {
@@ -113,6 +137,10 @@ let analyticsInitialized = false;
 let analyticsReady = false;
 let modelPickerOpen = false;
 let modelPickerActiveIndex = -1;
+let analyticsQueueLoaded = false;
+let analyticsQueue = [];
+let analyticsFlushTimer = null;
+let analyticsFlushInFlight = false;
 
 const createRequestId = () => (window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`);
 
@@ -124,6 +152,269 @@ function extractLinks(input) {
   const matches = input.match(urlRegex) || [];
   const unique = new Set(matches.map((link) => link.trim()));
   return Array.from(unique);
+}
+
+function hashIdentifier(value) {
+  if (!value || typeof value !== 'string') {
+    return null;
+  }
+  let hash = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(i);
+    hash |= 0;
+  }
+  return `h${Math.abs(hash)}`;
+}
+
+function sanitizeAnalyticsProps(props = {}) {
+  const entries = Object.entries(props || {});
+  const cleaned = {};
+  entries.forEach(([key, value]) => {
+    if (value === undefined || value === null) {
+      return;
+    }
+    if (typeof value === 'number') {
+      if (Number.isNaN(value)) {
+        return;
+      }
+      cleaned[key] = value;
+      return;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return;
+      }
+      cleaned[key] = trimmed.slice(0, 256);
+      return;
+    }
+    cleaned[key] = value;
+  });
+  return cleaned;
+}
+
+function getEndpointModeLabel() {
+  return state.settings?.useOpenAICompatibleEndpoint ? 'openai-compatible' : 'ollama';
+}
+
+function getEndpointHostLabel() {
+  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.hostname) {
+      return parsed.hostname;
+    }
+  } catch (err) {
+    // ignore
+  }
+  return 'custom-endpoint';
+}
+
+function isRemoteHostname(hostname) {
+  if (!hostname) {
+    return false;
+  }
+  const normalized = hostname.toLowerCase();
+  if (
+    normalized === 'localhost' ||
+    normalized === '127.0.0.1' ||
+    normalized === '::1' ||
+    normalized === '0.0.0.0'
+  ) {
+    return false;
+  }
+  if (normalized.endsWith('.local')) {
+    return false;
+  }
+  return true;
+}
+
+function getEndpointIsRemote() {
+  const endpoint = state.settings?.ollamaEndpoint || DEFAULT_SETTINGS.ollamaEndpoint;
+  try {
+    const parsed = new URL(endpoint);
+    return isRemoteHostname(parsed.hostname);
+  } catch (err) {
+    return false;
+  }
+}
+
+function getAttachmentMetrics() {
+  const count = state.attachments.length;
+  const bytes =
+    state.attachmentBytes && state.attachmentBytes > 0
+      ? state.attachmentBytes
+      : state.attachments.reduce((sum, file) => sum + (Number(file.size) || 0), 0);
+  return {
+    attachments_count: count,
+    attachments_total_bytes: bytes,
+  };
+}
+
+function buildAnalyticsPayload(props = {}) {
+  const attachments = getAttachmentMetrics();
+  const base = {
+    app_version: analyticsContext.appVersion,
+    platform: analyticsContext.platform,
+    arch: analyticsContext.arch,
+    release_channel: analyticsContext.releaseChannel,
+    electron_version: analyticsContext.electronVersion,
+    chrome_version: analyticsContext.chromeVersion,
+    os_version: analyticsContext.osVersion,
+    locale: analyticsContext.locale,
+    time_zone: analyticsContext.timeZone,
+    gpu_adapter: analyticsContext.gpuAdapter,
+    proxy_configured: Boolean(analyticsContext.proxyConfigured),
+    endpoint_mode: getEndpointModeLabel(),
+    endpoint_host: getEndpointHostLabel(),
+    endpoint_is_remote: getEndpointIsRemote(),
+    theme_preference: state.settings?.theme || DEFAULT_SETTINGS.theme,
+    share_analytics_opt_in: Boolean(state.settings?.shareAnalytics),
+    deep_research_enabled: Boolean(state.deepResearch?.enabled),
+    attachments_count: attachments.attachments_count,
+    attachments_total_bytes: attachments.attachments_total_bytes,
+    sidebar_collapsed: Boolean(state.sidebarCollapsed),
+    chat_id_hash: hashIdentifier(state.currentChatId),
+  };
+  return sanitizeAnalyticsProps({ ...base, ...props });
+}
+
+function formatErrorForAnalytics(error) {
+  if (!error) {
+    return 'unknown';
+  }
+  const message = typeof error === 'string' ? error : error?.message;
+  if (!message) {
+    return 'unknown';
+  }
+  return message.slice(0, ANALYTICS_ERROR_MAX_LEN);
+}
+
+async function hydrateAnalyticsContext() {
+  if (typeof window.api?.getAppInfo !== 'function') {
+    return analyticsContext;
+  }
+  try {
+    const info = await window.api.getAppInfo();
+    if (info && typeof info === 'object') {
+      analyticsContext.appVersion = info.version || analyticsContext.appVersion;
+      analyticsContext.arch = info.arch || analyticsContext.arch;
+      analyticsContext.releaseChannel = info.environment || analyticsContext.releaseChannel;
+      analyticsContext.electronVersion = info.electron || analyticsContext.electronVersion;
+      analyticsContext.chromeVersion = info.chrome || analyticsContext.chromeVersion;
+      if (info.platform) {
+        analyticsContext.platform = info.platform;
+      }
+      if (info.osVersion) {
+        analyticsContext.osVersion = info.osVersion;
+      }
+      if (info.locale) {
+        analyticsContext.locale = info.locale;
+      }
+      if (info.gpuAdapter) {
+        analyticsContext.gpuAdapter = info.gpuAdapter;
+      }
+      analyticsContext.proxyConfigured = Boolean(info.proxyConfigured);
+    }
+  } catch (err) {
+    console.error('Failed to load app info for analytics:', err);
+  }
+  return analyticsContext;
+}
+
+function loadAnalyticsQueueFromStorage() {
+  if (analyticsQueueLoaded) {
+    return;
+  }
+  analyticsQueueLoaded = true;
+  if (!window?.localStorage) {
+    analyticsQueue = [];
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(ANALYTICS_QUEUE_STORAGE_KEY);
+    if (!raw) {
+      analyticsQueue = [];
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      analyticsQueue = parsed.filter((event) => event && typeof event.name === 'string');
+    }
+  } catch (err) {
+    analyticsQueue = [];
+    console.error('Failed to load analytics queue:', err);
+  }
+}
+
+function persistAnalyticsQueue() {
+  if (!window?.localStorage) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(ANALYTICS_QUEUE_STORAGE_KEY, JSON.stringify(analyticsQueue));
+  } catch (err) {
+    console.error('Failed to persist analytics queue:', err);
+  }
+}
+
+function scheduleAnalyticsFlush(immediate = false) {
+  if (!analyticsReady) {
+    return;
+  }
+  if (analyticsFlushTimer) {
+    clearTimeout(analyticsFlushTimer);
+    analyticsFlushTimer = null;
+  }
+  const delay = immediate ? 0 : ANALYTICS_FLUSH_INTERVAL_MS;
+  analyticsFlushTimer = setTimeout(() => {
+    analyticsFlushTimer = null;
+    flushAnalyticsQueue();
+  }, delay);
+}
+
+async function flushAnalyticsQueue() {
+  if (analyticsFlushInFlight || !analyticsReady || typeof window.api?.trackAnalyticsEvent !== 'function') {
+    return;
+  }
+  loadAnalyticsQueueFromStorage();
+  if (!analyticsQueue.length) {
+    return;
+  }
+  analyticsFlushInFlight = true;
+  try {
+    while (analyticsQueue.length && analyticsReady) {
+      const { name, props } = analyticsQueue[0];
+      try {
+        await window.api.trackAnalyticsEvent(name, props);
+        analyticsQueue.shift();
+        persistAnalyticsQueue();
+      } catch (err) {
+        console.error('Failed to send analytics event:', err);
+        break;
+      }
+    }
+  } finally {
+    analyticsFlushInFlight = false;
+    if (analyticsQueue.length && analyticsReady) {
+      scheduleAnalyticsFlush();
+    }
+  }
+}
+
+function enqueueAnalyticsEvent(name, props) {
+  if (!name) {
+    return;
+  }
+  loadAnalyticsQueueFromStorage();
+  analyticsQueue.push({ name, props });
+  if (analyticsQueue.length > ANALYTICS_QUEUE_MAX) {
+    analyticsQueue = analyticsQueue.slice(-ANALYTICS_QUEUE_MAX);
+  }
+  persistAnalyticsQueue();
+  if (analyticsReady) {
+    scheduleAnalyticsFlush(true);
+  }
 }
 
 function createDeepResearchState() {
@@ -279,6 +570,46 @@ function stopGeneration(requestId) {
   return window.api.cancelOllama({ requestId });
 }
 
+function syncSendButtonState() {
+  if (!sendButton) {
+    return;
+  }
+  if (state.isStreaming) {
+    if (state.stopRequested) {
+      sendButton.textContent = 'Stopping…';
+      sendButton.disabled = true;
+    } else {
+      sendButton.textContent = 'Stop';
+      sendButton.disabled = false;
+    }
+    sendButton.classList.add('send-btn-stop');
+  } else {
+    state.stopRequested = false;
+    sendButton.textContent = 'Send';
+    sendButton.disabled = false;
+    sendButton.classList.remove('send-btn-stop');
+  }
+}
+
+async function handleStopRequest() {
+  if (!state.isStreaming || state.stopRequested) {
+    return;
+  }
+  state.stopRequested = true;
+  syncSendButtonState();
+  const requestId = state.activeRequestId;
+  if (!requestId) {
+    return;
+  }
+  try {
+    await stopGeneration(requestId);
+  } catch (err) {
+    console.error('Failed to cancel generation:', err);
+    state.stopRequested = false;
+    syncSendButtonState();
+  }
+}
+
 function formatBytes(value) {
   if (!Number.isFinite(value) || value <= 0) {
     return '0 B';
@@ -393,13 +724,17 @@ function removeEmptyState() {
 }
 
 function trackAnalyticsEvent(name, props = {}) {
-  if (!analyticsReady || typeof window.api.trackAnalyticsEvent !== 'function' || !name) {
+  if (!name) {
     return;
   }
   try {
-    window.api.trackAnalyticsEvent(name, props);
+    const payload = buildAnalyticsPayload(props);
+    enqueueAnalyticsEvent(name, payload);
+    if (analyticsReady) {
+      flushAnalyticsQueue();
+    }
   } catch (err) {
-    console.error('Failed to track analytics event:', err);
+    console.error('Failed to enqueue analytics event:', err);
   }
 }
 
@@ -418,6 +753,10 @@ async function setShareAnalyticsPreference(enabled) {
     const result = await window.api.initAnalytics({ optOut: !share });
     analyticsInitialized = Boolean(result?.initialized);
     analyticsReady = analyticsInitialized && !result?.optedOut;
+    if (analyticsReady) {
+      scheduleAnalyticsFlush(true);
+      flushAnalyticsQueue();
+    }
   } catch (err) {
     analyticsInitialized = false;
     analyticsReady = false;
@@ -550,8 +889,78 @@ function stopAttachmentStatusTimer() {
     clearInterval(attachmentStatusTimer);
     attachmentStatusTimer = null;
   }
+  if (typeof state.attachmentProcessingStartedAt === 'number') {
+    state.lastAttachmentIngestDurationMs = Math.max(0, Date.now() - state.attachmentProcessingStartedAt);
+  }
   state.attachmentProcessingStartedAt = null;
   updateAttachmentNoticeText();
+}
+
+function consumePromptAnalyticsSnapshot() {
+  const snapshot = {
+    prompt: state.lastPromptMetrics || {},
+    webFetchMs: state.lastWebSearchDurationMs,
+    attachmentMs: state.lastAttachmentIngestDurationMs,
+  };
+  state.lastPromptMetrics = null;
+  state.webSearchStartedAt = null;
+  state.lastWebSearchDurationMs = null;
+  state.lastAttachmentIngestDurationMs = null;
+  return snapshot;
+}
+
+function finalizeWebSearchDuration() {
+  if (typeof state.webSearchStartedAt === 'number') {
+    state.lastWebSearchDurationMs = Math.max(0, Date.now() - state.webSearchStartedAt);
+    state.webSearchStartedAt = null;
+  }
+  return state.lastWebSearchDurationMs;
+}
+
+function trackResponseCompletedAnalytics(result, { model, usedDeepResearch }) {
+  const snapshot = consumePromptAnalyticsSnapshot();
+  const promptMetrics = snapshot.prompt || {};
+  const timing = result?.timing || {};
+  const totalMs =
+    timing.totalMs ??
+    (promptMetrics.startedAt ? Math.max(0, Date.now() - promptMetrics.startedAt) : null);
+  trackAnalyticsEvent('response_completed', {
+    model: model || promptMetrics.model || null,
+    prompt_chars: promptMetrics.promptChars ?? null,
+    response_chars: typeof result.answer === 'string' ? result.answer.length : null,
+    model_load_ms: timing.loadMs ?? timing.firstTokenMs ?? null,
+    generation_ms: timing.generationMs ?? timing.streamMs ?? null,
+    total_ms: totalMs,
+    tokens: Number.isFinite(timing.tokens) ? timing.tokens : null,
+    tokens_per_second: Number.isFinite(timing.tokensPerSecond) ? timing.tokensPerSecond : null,
+    web_fetch_ms: snapshot.webFetchMs ?? null,
+    attachments_ingest_ms: snapshot.attachmentMs ?? null,
+    used_web_search: Boolean(result.usedWebSearch),
+    reused_conversation_memory: Boolean(result.reusedConversationMemory),
+    used_deep_research: Boolean(usedDeepResearch),
+    used_attachments: Boolean(promptMetrics.attachmentsCount),
+  });
+}
+
+function trackResponseErrorAnalytics(errorType, errorMessage, { model, timing } = {}) {
+  const snapshot = consumePromptAnalyticsSnapshot();
+  const promptMetrics = snapshot.prompt || {};
+  const timingInfo = timing || {};
+  const totalMs =
+    timingInfo.totalMs ??
+    (promptMetrics.startedAt ? Math.max(0, Date.now() - promptMetrics.startedAt) : null);
+  trackAnalyticsEvent('response_error', {
+    model: model || promptMetrics.model || null,
+    prompt_chars: promptMetrics.promptChars ?? null,
+    error_type: errorType,
+    error_message: errorMessage ? errorMessage.slice(0, ANALYTICS_ERROR_MAX_LEN) : 'unknown',
+    model_load_ms: timingInfo.loadMs ?? timingInfo.firstTokenMs ?? null,
+    generation_ms: timingInfo.generationMs ?? timingInfo.streamMs ?? null,
+    total_ms: totalMs,
+    web_fetch_ms: snapshot.webFetchMs ?? null,
+    attachments_ingest_ms: snapshot.attachmentMs ?? null,
+    used_attachments: Boolean(promptMetrics.attachmentsCount),
+  });
 }
 
 function setComposerDragState(active) {
@@ -593,6 +1002,27 @@ function registerGlobalDropGuards() {
   window.addEventListener('drop', guardDrop);
 
   globalDropGuardsRegistered = true;
+}
+
+function registerExternalLinkHandler() {
+  document.addEventListener('click', (event) => {
+    const anchor = event.target?.closest?.('a[href]');
+    if (!anchor) {
+      return;
+    }
+    const href = anchor.getAttribute('href');
+    if (!href || href.startsWith('#')) {
+      return;
+    }
+    if (!/^https?:/i.test(href)) {
+      return;
+    }
+    if (typeof window.api?.openExternal !== 'function') {
+      return;
+    }
+    event.preventDefault();
+    window.api.openExternal(href);
+  });
 }
 
 function registerComposerDropZone() {
@@ -925,6 +1355,20 @@ window.addEventListener('DOMContentLoaded', async () => {
   deepResearchDetails = document.getElementById('deepResearchDetails');
 
   registerGlobalDropGuards();
+  registerExternalLinkHandler();
+
+  loadAnalyticsQueueFromStorage();
+  window.addEventListener('online', () => {
+    if (analyticsReady) {
+      scheduleAnalyticsFlush(true);
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && analyticsReady) {
+      scheduleAnalyticsFlush(true);
+    }
+  });
+  await hydrateAnalyticsContext();
 
   if (modelPickerButton && modelPickerMenu) {
     modelPickerButton.addEventListener('click', () => {
@@ -992,6 +1436,14 @@ function registerUIListeners() {
   inputForm.addEventListener('submit', async (event) => {
     event.preventDefault();
     await handlePromptSubmit();
+  });
+
+  sendButton?.addEventListener('click', async (event) => {
+    if (!state.isStreaming) {
+      return;
+    }
+    event.preventDefault();
+    await handleStopRequest();
   });
 
   promptInput.addEventListener('keydown', async (event) => {
@@ -1113,13 +1565,24 @@ function registerUIListeners() {
 
 
 
-  document.addEventListener('keydown', (event) => {
+  document.addEventListener('keydown', async (event) => {
     if (event.key === 'Escape') {
       if (state.settingsPanelOpen) {
         closeSettingsPanel();
       }
       if (!tutorialOverlay?.classList.contains('hidden')) {
         dismissTutorial();
+      }
+      return;
+    }
+    const isMac = navigator.platform.toUpperCase().includes('MAC');
+    const cmdOrCtrl = isMac ? event.metaKey : event.ctrlKey;
+    if (cmdOrCtrl && !event.shiftKey && !event.altKey && !event.isComposing) {
+      if (event.key === 'n' || event.key === 'N') {
+        event.preventDefault();
+        if (!state.isStreaming) {
+          await handleNewChat();
+        }
       }
     }
   });
@@ -1360,6 +1823,7 @@ function registerStreamHandlers() {
         break;
       }
       case 'generating': {
+        finalizeWebSearchDuration();
         const status = deriveStatus('Generating response…');
         entry.setSummary(status);
         entry.setLoadingStatus?.(status);
@@ -1367,6 +1831,10 @@ function registerStreamHandlers() {
       }
       case 'search-plan':
       case 'search-started': {
+        if (typeof state.webSearchStartedAt !== 'number') {
+          state.webSearchStartedAt = Date.now();
+        }
+        state.lastWebSearchDurationMs = null;
         const status = deriveStatus('Searching the web…');
         entry.setSummary(status);
         entry.setLoadingStatus?.(status);
@@ -1379,6 +1847,7 @@ function registerStreamHandlers() {
         break;
       }
       case 'context': {
+        finalizeWebSearchDuration();
         const hasContext =
           Boolean(data.context?.trim()) ||
           (Array.isArray(data.attachments) && data.attachments.length > 0);
@@ -2292,6 +2761,12 @@ async function populateModels() {
         duration: 8000,
       });
       updateModelStatus(`No models detected at ${endpoint}.`, 'warning');
+      trackAnalyticsEvent('models_missing', {
+        provider: providerShort,
+        using_chat_compat: usingChatCompat,
+        reason: 'empty-response',
+        error_type: 'models_missing',
+      });
       return;
     }
 
@@ -2313,6 +2788,11 @@ async function populateModels() {
     renderModelPickerMenu(state.models);
     updateModelPickerDisplay();
     setModelPickerDisabled(false);
+    trackAnalyticsEvent('models_refreshed', {
+      model_count: state.models.length,
+      restored_previous_selection: Boolean(previousValue && modelSelect.value === previousValue),
+      using_chat_compat: usingChatCompat,
+    });
 
     const countLabel = state.models.length === 1 ? 'model' : 'models';
     updateModelStatus(`Connected: ${state.models.length} ${countLabel} available via ${providerStatus}.`, 'success');
@@ -2327,6 +2807,12 @@ async function populateModels() {
       duration: 8000,
     });
     updateModelStatus(`Unable to reach ${providerLabel} at ${endpoint}.`, 'error');
+    trackAnalyticsEvent('models_refresh_failed', {
+      provider: providerLabel,
+      using_chat_compat: usingChatCompat,
+      error: formatErrorForAnalytics(err),
+      error_type: 'models_refresh_failed',
+    });
   } finally {
     setModelControlsDisabled(false);
   }
@@ -2348,6 +2834,9 @@ async function handlePromptSubmit() {
 
   const chatId = state.currentChatId;
   const model = modelSelect.value;
+  state.webSearchStartedAt = null;
+  state.lastWebSearchDurationMs = null;
+  state.lastAttachmentIngestDurationMs = null;
 
   if (!model) {
     if (modelPickerButton) {
@@ -2381,17 +2870,31 @@ async function handlePromptSubmit() {
     deep_research_enabled: Boolean(state.deepResearch.enabled),
   });
 
+  state.stopRequested = false;
   state.isStreaming = true;
   updateInteractivity();
   const hasAttachments = state.attachments.length > 0;
   stopAttachmentStatusTimer();
   if (hasAttachments) {
+    state.lastAttachmentIngestDurationMs = null;
     state.attachmentProcessingStartedAt = Date.now();
     startAttachmentStatusTimer();
+  } else {
+    state.lastAttachmentIngestDurationMs = null;
   }
   renderAttachmentList();
 
   const requestId = createRequestId();
+  state.lastPromptMetrics = {
+    requestId,
+    promptChars: prompt.length,
+    attachmentsCount: state.attachments.length,
+    attachmentsBytes: state.attachmentBytes,
+    startedAt: Date.now(),
+    model,
+    chatId,
+    deepResearchEnabled: Boolean(state.deepResearch.enabled),
+  };
   const userLinks = extractLinks(prompt);
 
   const assistantEntry = appendAssistantMessage('', {
@@ -2401,27 +2904,6 @@ async function handlePromptSubmit() {
     loading: true,
     loadingStatus: 'Loading model…',
   });
-  let cancelRequested = false;
-
-  const stopButton = document.createElement('button');
-  stopButton.type = 'button';
-  stopButton.classList.add('stop-generation-btn');
-  stopButton.textContent = 'Stop';
-  stopButton.setAttribute('aria-label', 'Stop generating response');
-  stopButton.addEventListener('click', () => {
-    if (stopButton.disabled) {
-      return;
-    }
-    stopButton.disabled = true;
-    stopButton.textContent = 'Stopping…';
-    cancelRequested = true;
-    stopGeneration(requestId).catch((err) => {
-      console.error('Failed to cancel generation:', err);
-      stopButton.disabled = false;
-      stopButton.textContent = 'Stop';
-    });
-  });
-  assistantEntry.addActionButton(stopButton);
   assistantEntry.__autoOpenedReasoning = false;
 
   state.pendingAssistantByChat.set(chatId, assistantEntry);
@@ -2434,7 +2916,7 @@ async function handlePromptSubmit() {
       deepResearchPayload = await runDeepResearchSequence(prompt, model);
     }
 
-    if (cancelRequested) {
+    if (state.stopRequested) {
       assistantEntry.clearActions();
       assistantEntry.stopLoading?.();
       assistantEntry.setSummary('Canceled');
@@ -2445,6 +2927,7 @@ async function handlePromptSubmit() {
       updateInteractivity();
       stopAttachmentStatusTimer();
       renderAttachmentList();
+      consumePromptAnalyticsSnapshot();
       return;
     }
 
@@ -2469,6 +2952,7 @@ async function handlePromptSubmit() {
       updateInteractivity();
       stopAttachmentStatusTimer();
       renderAttachmentList();
+      consumePromptAnalyticsSnapshot();
       return;
     }
 
@@ -2484,9 +2968,9 @@ async function handlePromptSubmit() {
       updateInteractivity();
       stopAttachmentStatusTimer();
       renderAttachmentList();
-      trackAnalyticsEvent('response_error', {
-        type: 'model_error',
-        message: String(result.error || '').slice(0, 120),
+      trackResponseErrorAnalytics('model_error', String(result.error || ''), {
+        model,
+        timing: result.timing,
       });
       return;
     }
@@ -2559,6 +3043,7 @@ async function handlePromptSubmit() {
     updateInteractivity();
     stopAttachmentStatusTimer();
     renderAttachmentList();
+    trackResponseCompletedAnalytics(result, { model, usedDeepResearch: usesDeepResearch });
     await refreshChatList(chatId);
   } catch (err) {
     console.error(err);
@@ -2574,9 +3059,8 @@ async function handlePromptSubmit() {
     updateInteractivity();
     stopAttachmentStatusTimer();
     renderAttachmentList();
-    trackAnalyticsEvent('response_error', {
-      type: 'exception',
-      message: String(err?.message || err || 'Unknown error').slice(0, 120),
+    trackResponseErrorAnalytics('exception', String(err?.message || err || 'Unknown error'), {
+      model,
     });
   }
 }
@@ -2642,7 +3126,8 @@ function renderChat(chat) {
     empty.innerHTML = `
       <div class="empty-copy">
         <h2>Ready when you are</h2>
-        <p>Select a model, drop in context, then ask anything. Your conversations stay on this device.</p>
+        <p>Select a model, drop in context, then ask anything.</p>
+        <p>Your conversations stay private.</p>
       </div>
     `;
     chatArea.appendChild(empty);
@@ -3032,9 +3517,7 @@ function setModelControlsDisabled(disabled) {
 }
 
 function updateInteractivity() {
-  if (sendButton) {
-    sendButton.disabled = state.isStreaming;
-  }
+  syncSendButtonState();
   if (newChatButton) {
     newChatButton.disabled = state.isStreaming;
   }

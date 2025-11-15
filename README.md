@@ -12,7 +12,7 @@ DioxideAi is a desktop chat client for [Ollama](https://ollama.ai) that automati
 - Customisable model host (defaults to `http://localhost:11434`). Flip the llama.cpp/ChatGPT-compatible toggle in Settings when targeting OpenAI-style endpoints.
 - Dark terminal theme (black + neon green) that tracks your system appearance or can be forced from Settings.
 - Integrated analytics (opt-in, anonymised) powered by Amplitude.
-- Secure support modal with direct QR code and BTC address – free to use, donations welcome.
+- Support the project via [Buy Me a Coffee](https://buymeacoffee.com/dioxideai) – free to use, donations welcome.
 - Local-first storage; chats and preferences live under `app.getPath('userData')`.
 
 ## Requirements
@@ -52,7 +52,7 @@ Open the gear icon to reveal the modal preferences panel:
 - **Model server endpoint** – URL used for `/api/tags` and `/api/chat` (defaults to `http://localhost:11434`). Point this at your ChatGPT-compatible server when not using Ollama.
 - **llama.cpp / ChatGPT-compatible mode** – makes the app talk to OpenAI-style `/v1/models` and `/v1/chat/completions` endpoints (llama.cpp, LM Studio, etc.).
 - **Share anonymous usage analytics** – opt in/out of Amplitude tracking.
-- **WinRAR-style support** – modal overlay with QR and BTC address.
+- **Support DioxideAi** – in-app link to Buy Me a Coffee.
 - **Delete all chats** – wipe the history immediately.
 
 All preferences persist at `~/Library/Application Support/DioxideAi/dioxideai-settings.json`.

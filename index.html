@@ -227,13 +227,23 @@
           </div>
         </fieldset>
 
+        <fieldset class="settings-support">
+          <legend>Support</legend>
+          <p>
+            Enjoying DioxideAi? <a href="https://buymeacoffee.com/dioxideai" target="_blank" rel="noopener noreferrer">Buy me a coffee</a> to keep updates coming.
+          </p>
+        </fieldset>
+
         <fieldset>
           <legend>Privacy</legend>
           <label class="setting-toggle">
             <input type="checkbox" id="shareAnalyticsToggle" checked />
             <span>
               <strong>Share anonymous usage analytics</strong>
-              <small>Help improve DioxideAi by sending basic, anonymized usage events.</small>
+              <small>
+                Help improve DioxideAi by sending basic metrics.
+                <a href="https://github.com/ianrelecker/dioxideai/blob/main/privacy.md" target="_blank" rel="noopener noreferrer">Here’s what’s collected.</a>
+              </small>
             </span>
           </label>
         </fieldset>
@@ -277,15 +287,15 @@ ollama pull mistral:7b</code></pre>
         </section>
         <section>
           <h3>4. Pick the right size</h3>
-          <p>Match the model to your Mac's GPU/VRAM:</p>
+          <p>Match the model to your Mac's unified memory budget (as of November 2025—revisit often as open-source models evolve):</p>
           <ul>
-            <li><strong>16&nbsp;GB VRAM:</strong> <code>gemma:7b</code>, <code>llama3:8b</code></li>
-            <li><strong>24&nbsp;GB VRAM:</strong> <code>gemma3:12b</code></li>
-            <li><strong>32&nbsp;GB VRAM:</strong> <code>gpt-oss:20b</code></li>
-            <li><strong>48&nbsp;GB VRAM:</strong> <code>llama3:70b</code> (Q4)</li>
-            <li><strong>64&nbsp;GB VRAM and up:</strong> <code>gpt-oss:70b</code>, <code>mixtral:8x22b</code> (Q4/Q5)</li>
+            <li><strong>16&nbsp;GB unified memory:</strong> <code>llama3.1:8b</code>, <code>gemma:7b</code></li>
+            <li><strong>24&nbsp;GB unified memory:</strong> <code>gemma3:12b</code>, <code>llama3.1:8b</code>, <code>gpt-oss:20b</code> (stretch)</li>
+            <li><strong>32&nbsp;GB unified memory:</strong> <code>gpt-oss:20b</code>, <code>gemma3:12b</code>, <code>mixtral:8x7b</code></li>
+            <li><strong>48&nbsp;GB unified memory:</strong> <code>gpt-oss:20b</code>, <code>llama3.1:70b</code> (slower)</li>
+            <li><strong>64&nbsp;GB unified memory and up:</strong> <code>llama3.1:70b</code>, <code>llama3.3:70b</code>, <code>gpt-oss:20b</code>, <code>gpt-oss:120b</code> (experimental)</li>
           </ul>
-          <p>Check VRAM via <em>About This Mac → System Report → Graphics/Displays</em>.</p>
+          <p>Check unified memory via <em>About This Mac → System Report → Graphics/Displays</em>.</p>
         </section>
         <section>
           <h3>5. Connect in DioxideAi</h3>
@@ -293,6 +303,7 @@ ollama pull mistral:7b</code></pre>
             With Ollama running, pick your downloaded model in the header and start chatting. Fresh web context is
             fetched automatically when needed.
           </p>
+          <p><strong>Tip:</strong> Press <kbd>⌘</kbd>+<kbd>N</kbd> to start a new chat from anywhere.</p>
         </section>
       </div>
       <footer class="tutorial-footer">
@@ -302,7 +313,10 @@ ollama pull mistral:7b</code></pre>
         </label>
         <label class="tutorial-checkbox">
           <input type="checkbox" id="tutorialAnalyticsCheckbox" checked />
-          <span>Share anonymous usage analytics to help improve DioxideAi</span>
+          <span>
+            Share anonymous usage analytics to help improve DioxideAi.
+            <a href="https://github.com/ianrelecker/dioxideai/blob/main/privacy.md" target="_blank" rel="noopener noreferrer">Here’s what’s collected.</a>
+          </span>
         </label>
         <div class="tutorial-actions">
           <a class="secondary" href="https://ollama.ai" target="_blank" rel="noopener noreferrer">Visit Ollama</a>

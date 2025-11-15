@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { promises: fsPromises } = fs;
@@ -10,6 +10,7 @@ const dnsPromises = dns.promises;
 const cheerio = require('cheerio');
 const { marked } = require('marked');
 const { autoUpdater } = require('electron-updater');
+const os = require('os');
 
 const isDevelopment = !app.isPackaged;
 
@@ -61,6 +62,7 @@ let analyticsDeviceId = null;
 let analyticsDeviceIdPromise = null;
 let analyticsApiKey = null;
 let analyticsApiKeyLoaded = false;
+let cachedAppInfoPayload = null;
 
 function normalizeOllamaEndpoint(value) {
   const trimmed = typeof value === 'string' ? value.trim() : '';
@@ -643,7 +645,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 960,
     height: 780,
-    minWidth: 860,
+    minWidth: 760,
     minHeight: 640,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -699,9 +701,82 @@ ipcMain.handle('check-for-updates', async () => {
   }
 });
 
+async function resolveAppInfoPayload() {
+  if (cachedAppInfoPayload) {
+    return cachedAppInfoPayload;
+  }
+  const osVersion =
+    typeof process.getSystemVersion === 'function'
+      ? process.getSystemVersion()
+      : `${os.type()} ${os.release()}`;
+  const proxyConfigured = Boolean(
+    process.env.HTTPS_PROXY ||
+      process.env.https_proxy ||
+      process.env.HTTP_PROXY ||
+      process.env.http_proxy
+  );
+  const payload = {
+    version: app.getVersion(),
+    platform: process.platform,
+    arch: process.arch,
+    electron: process.versions.electron,
+    node: process.versions.node,
+    chrome: process.versions.chrome,
+    environment: isDevelopment ? 'development' : 'production',
+    osVersion,
+    locale: app.getLocale?.() || null,
+    proxyConfigured,
+    gpuAdapter: null,
+  };
+  if (typeof app.getGPUInfo === 'function') {
+    try {
+      const gpuInfo = await app.getGPUInfo('basic');
+      const devices = Array.isArray(gpuInfo?.gpuDevice) ? gpuInfo.gpuDevice : [];
+      if (devices.length) {
+        const primary = devices.find((device) => device?.active) || devices[0];
+        payload.gpuAdapter =
+          primary?.deviceString ||
+          primary?.name ||
+          primary?.model ||
+          primary?.vendor ||
+          null;
+      }
+    } catch (err) {
+      console.error('Failed to retrieve GPU info:', err);
+    }
+  }
+  cachedAppInfoPayload = payload;
+  return payload;
+}
+
 ipcMain.handle('get-settings', async () => {
   await ensureSettingsLoaded();
   return getRendererSafeSettings();
+});
+
+ipcMain.handle('get-app-info', async () => {
+  if (!app.isReady()) {
+    await app.whenReady();
+  }
+  const info = await resolveAppInfoPayload();
+  return { ...info };
+});
+
+ipcMain.handle('open-external', async (_event, rawUrl = '') => {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    return { error: 'Invalid URL' };
+  }
+  try {
+    const parsed = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return { error: 'Blocked protocol' };
+    }
+    await shell.openExternal(parsed.toString());
+    return { opened: true };
+  } catch (err) {
+    console.error('Failed to open external link:', err);
+    return { error: err.message || 'Failed to open link' };
+  }
 });
 
 ipcMain.handle('update-settings', async (_event, partialSettings) => {
