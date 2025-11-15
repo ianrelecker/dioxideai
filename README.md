@@ -1,19 +1,20 @@
 # DioxideAi
 
-DioxideAi is a desktop chat client for [Ollama](https://ollama.ai) that automatically augments every prompt with live DuckDuckGo context. Version 2 ships a revamped support dialog, per-install analytics, and a configurable Ollama endpoint for remote servers.
+DioxideAi is a desktop LLM chat client that automatically augments every prompt with live DuckDuckGo context. Version 2 ships a revamped support dialog, per-install analytics, and a configurable Ollama or ChatGPT compatible API endpoint for remote servers.
 
 ## Highlights
 
-- Multi-chat workspace with persistent history and one-tap **New Chat**.
-- Token streaming from Ollama’s `/api/chat`, plus a unified send/stop button that cancels generations instantly.
-- Rich “Thoughts” drawer that mirrors the assistant’s stages (model loading, web search, context ingestion, generation).
-- Automatic DuckDuckGo scraping on *every* user message (no API key required).
-- Attachment support for local `.txt/.md/.json/...` files with per-file and per-request size policing.
-- Customisable model host (defaults to `http://localhost:11434`). Flip the llama.cpp/ChatGPT-compatible toggle in Settings when targeting OpenAI-style endpoints.
-- Dark terminal theme (black + neon green) that tracks your system appearance or can be forced from Settings.
-- Integrated analytics (opt-in, anonymised) powered by Amplitude with detailed, privacy-preserving timing spans (see [`privacy.md`](privacy.md)).
-- Support the project via [Buy Me a Coffee](https://buymeacoffee.com/dioxideai) – free to use, donations welcome.
-- Local-first storage; chats and preferences live under `app.getPath('userData')`.
+- **Multiple chats** – persistent histories with one-tap **New Chat** and Cmd/Ctrl + N shortcuts.
+- **Live streaming + cancel** – models stream tokens in real time, and the send button flips to a stop button for instant cancellation.
+- **Deep research mode** – optional multi-pass planning that gathers sources, logs progress, and inserts findings into your prompt.
+- **Thoughts panel** – shows model load, web search, context ingestion, and timing breakdowns.
+- **Automatic DuckDuckGo search** – every prompt gets fresh web snippets (no API key required).
+- **Attachment intelligence** – drop `.txt/.md/.json/...` files with per-file and per-request limits plus truncation warnings.
+- **Flexible endpoints** – point at local Ollama or OpenAI-compatible hosts (llama.cpp, LM Studio, etc.).
+- **Themes + layout** – neon dark terminal look that tracks the OS or locks to light/dark, plus collapsible sidebar.
+- **Privacy-aware analytics** – opt-in Amplitude events with detailed timing spans and hashed identifiers (see [`privacy.md`](privacy.md)).
+- **Support-friendly** – in-app Buy Me a Coffee link and tutorial tips.
+- **Local-first** – chats, attachments, and settings never leave `app.getPath('userData')`.
 
 ## Requirements
 
@@ -24,7 +25,7 @@ DioxideAi is a desktop chat client for [Ollama](https://ollama.ai) that automati
 ## Setup
 
 ```bash
-git clone <repo>
+git clone https://github.com/ianrelecker/dioxideai.git
 cd dioxideai
 npm install
 npm run dev
@@ -91,7 +92,3 @@ dioxideai/
 ## License
 
 This project is released under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may read and build upon the source for personal or internal use, but any commercial/production deployment requires a separate commercial license from Ian Relecker.
-
-## Release Notes
-
-See [release-notes.md](release-notes.md) for the latest changes since v2.0.0, including the new model picker, unified stop control, expanded analytics, and refreshed tutorial guidance.
