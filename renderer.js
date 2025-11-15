@@ -1004,25 +1004,31 @@ function registerGlobalDropGuards() {
   globalDropGuardsRegistered = true;
 }
 
+function handleExternalLink(event) {
+  const anchor = event.target?.closest?.('a[href]');
+  if (!anchor) {
+    return;
+  }
+  const href = anchor.getAttribute('href');
+  if (!href || href.startsWith('#') || !/^https?:/i.test(href)) {
+    return;
+  }
+  if (typeof window.api?.openExternal !== 'function') {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  window.api.openExternal(href);
+}
+
 function registerExternalLinkHandler() {
-  document.addEventListener('click', (event) => {
-    const anchor = event.target?.closest?.('a[href]');
-    if (!anchor) {
+  document.addEventListener('click', handleExternalLink, true);
+  document.addEventListener('auxclick', (event) => {
+    if (event.button === 0) {
       return;
     }
-    const href = anchor.getAttribute('href');
-    if (!href || href.startsWith('#')) {
-      return;
-    }
-    if (!/^https?:/i.test(href)) {
-      return;
-    }
-    if (typeof window.api?.openExternal !== 'function') {
-      return;
-    }
-    event.preventDefault();
-    window.api.openExternal(href);
-  });
+    handleExternalLink(event);
+  }, true);
 }
 
 function registerComposerDropZone() {
