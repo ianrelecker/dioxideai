@@ -5,13 +5,13 @@ DioxideAi is a desktop chat client for [Ollama](https://ollama.ai) that automati
 ## Highlights
 
 - Multi-chat workspace with persistent history and one-tap **New Chat**.
-- Token streaming from Ollama’s `/api/chat`, plus stop/resume controls.
+- Token streaming from Ollama’s `/api/chat`, plus a unified send/stop button that cancels generations instantly.
 - Rich “Thoughts” drawer that mirrors the assistant’s stages (model loading, web search, context ingestion, generation).
 - Automatic DuckDuckGo scraping on *every* user message (no API key required).
 - Attachment support for local `.txt/.md/.json/...` files with per-file and per-request size policing.
 - Customisable model host (defaults to `http://localhost:11434`). Flip the llama.cpp/ChatGPT-compatible toggle in Settings when targeting OpenAI-style endpoints.
 - Dark terminal theme (black + neon green) that tracks your system appearance or can be forced from Settings.
-- Integrated analytics (opt-in, anonymised) powered by Amplitude.
+- Integrated analytics (opt-in, anonymised) powered by Amplitude with detailed, privacy-preserving timing spans (see [`privacy.md`](privacy.md)).
 - Support the project via [Buy Me a Coffee](https://buymeacoffee.com/dioxideai) – free to use, donations welcome.
 - Local-first storage; chats and preferences live under `app.getPath('userData')`.
 
@@ -38,7 +38,7 @@ The dev script launches Electron with hot reload. Keep the Ollama daemon running
 2. Compose a prompt (drag files into the composer or use **Attach file**) and press **Send**.
 3. The main process always gathers fresh web snippets for the prompt, streams the response from Ollama, and updates the Thoughts panel as context arrives.
 4. Use the **Stop** button to cancel long generations, open Thoughts to inspect retrieved snippets, reasoning, and timing, and toggle **Hide Chats** when you need a distraction-free workspace.
-5. Switch endpoints or refresh the model list from Settings without restarting.
+5. Switch endpoints or refresh the model list from Settings without restarting. Press **Cmd/Ctrl + N** anywhere to create a new chat instantly.
 
 Chats auto-save and reload on launch. Attachment limits are enforced (4 files, 512 KB each, 1 MB total).
 
@@ -90,4 +90,8 @@ dioxideai/
 
 ## License
 
-MIT © Your Name
+This project is released under the [PolyForm Noncommercial License 1.0.0](LICENSE). You may read and build upon the source for personal or internal use, but any commercial/production deployment requires a separate commercial license from Ian Relecker.
+
+## Release Notes
+
+See [release-notes.md](release-notes.md) for the latest changes since v2.0.0, including the new model picker, unified stop control, expanded analytics, and refreshed tutorial guidance.
