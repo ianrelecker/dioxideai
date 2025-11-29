@@ -639,6 +639,12 @@ const DUCKDUCKGO_SEARCH_VARIANTS = [
 app.whenReady().then(async () => {
   await Promise.all([ensureSettingsLoaded(), ensureChatsLoaded()]);
   createWindow();
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
 });
 
 function createWindow() {
@@ -666,12 +672,6 @@ function createWindow() {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
-  }
-});
-
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
   }
 });
 
