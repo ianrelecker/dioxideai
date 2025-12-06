@@ -9,6 +9,7 @@ const dns = require('dns');
 const dnsPromises = dns.promises;
 const cheerio = require('cheerio');
 const { marked } = require('marked');
+const sanitizeHtml = require('sanitize-html');
 const { autoUpdater } = require('electron-updater');
 const os = require('os');
 
@@ -862,7 +863,18 @@ ipcMain.handle('cancel-ollama', async (_event, { requestId }) => {
 
 ipcMain.handle('render-markdown', async (_event, text) => {
   try {
-    return marked.parse(String(text || ''));
+    const rawHtml = marked.parse(String(text || ''));
+    return sanitizeHtml(rawHtml, {
+      allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img']),
+      allowedAttributes: {
+        ...sanitizeHtml.defaults.allowedAttributes,
+        img: ['src', 'alt', 'title', 'width', 'height'],
+        code: ['class'],
+        pre: ['class'],
+        span: ['class'],
+      },
+      allowedSchemes: ['http', 'https', 'mailto', 'tel', 'data'],
+    });
   } catch (err) {
     console.error('Failed to render markdown:', err);
     return String(text || '');
